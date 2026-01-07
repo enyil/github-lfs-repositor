@@ -4,7 +4,6 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { 
@@ -105,190 +104,190 @@ function App() {
 
     try {
       const allRepos = await fetchOrgRepos(
+        orgName.trim(),
         getCurrentToken(),
-        getCurrentToken(),
+        (fetchedRepos, page) => {
           setProgress(prev => ({
+            ...prev,
             fetchedRepos: fetchedRepos.length,
             totalRepos: fetchedRepos.length,
             currentRepo: `Page ${page}`
-            totalRepos: fetchedRepos.length,
-            currentRepo: `Page ${page}`
           }))
-      )
+        },
         handleRateLimit
-      )(prev => ({
+      )
 
+      setProgress(prev => ({
+        ...prev,
         phase: 'checking-lfs',
-        ...prev,Repos.length,
-        phase: 'checking-lfs',
+        totalRepos: allRepos.length
       }))
 
       const checkedRepos = await checkAllReposForLfs(
         allRepos,
         getCurrentToken(),
         (checked, current, lfsFound) => {
-        getCurrentToken(),
+          setProgress(prev => ({
             ...prev,
             checkedRepos: checked,
-            ...prev,
-            checkedRepos: checked,
-          }))
+            currentRepo: current,
             lfsReposFound: lfsFound
-      )
+          }))
         },
+        handleRateLimit
+      )
+
       setRepos(checkedRepos)
       setProgress(prev => ({
-
-        phase: 'complete',
-        lfsReposFound: checkedRepos.filter(r => r.hasLfs).length
         ...prev,
         phase: 'complete',
         checkedRepos: checkedRepos.length,
         lfsReposFound: checkedRepos.filter(r => r.hasLfs).length
+      }))
+    } catch (error) {
+      setProgress(prev => ({
+        ...prev,
         phase: 'error',
         error: error instanceof Error ? error.message : 'Unknown error'
       }))
-        ...prev,
-  }
-        error: error instanceof Error ? error.message : 'Unknown error'
-  const handleExport = () => {
     }
   }
 
-
-  const lfsRepos = repos.filter(r => r.hasLfs)
+  const handleExport = () => {
+    const lfsRepos = repos.filter(r => r.hasLfs)
+    const csv = generateCsv(lfsRepos)
     downloadCsv(csv, `${orgName}-lfs-repos-${new Date().toISOString().split('T')[0]}.csv`)
   }
-? Math.round((progress.checkedRepos / progress.totalRepos) * 100)
 
+  const lfsRepos = repos.filter(r => r.hasLfs)
   const isScanning = progress.phase === 'fetching-repos' || progress.phase === 'checking-lfs'
   const scanProgress = progress.totalRepos > 0 
-      <div className="max-w-6xl mx-auto space-y-6">
-    : 0lassName="flex items-center gap-3 mb-8">
+    ? Math.round((progress.checkedRepos / progress.totalRepos) * 100)
+    : 0
 
-  return ( className="text-primary" />
+  return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-8">
-          <div>
+      <div className="max-w-6xl mx-auto space-y-6">
         <header className="flex items-center gap-3 mb-8">
           <div className="p-3 bg-primary/10 rounded-lg">
+            <GithubLogo size={32} className="text-primary" />
           </div>
-        </header>
           <div>
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight">LFS Repository Finder</h1>
             <p className="text-muted-foreground text-sm">Scan large GitHub organizations for Git LFS usage</p>
-          </div>dHeader className="pb-3">
-        </header>e flex items-center gap-2">
+          </div>
+        </header>
 
         <div className="grid gap-6 md:grid-cols-2">
           <Card className="bg-card border-border">
-            </CardHeader>
+            <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <MagnifyingGlass size={18} />
+                Organization
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex gap-2">
                 <Input
                   id="org-name"
-            </CardHeader>
-                  value={orgName}
-              <div className="flex gap-2">
-                <Inputn={(e) => e.key === 'Enter' && !isScanning && handleScan()}
-                  id="org-name"
                   placeholder="e.g. microsoft, google, facebook"
-                />
+                  value={orgName}
                   onChange={(e) => setOrgName(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && !isScanning && handleScan()}
                   disabled={isScanning}
                   className="bg-input border-border font-mono"
-                >
+                />
                 <Button 
-                    <span className="flex items-center gap-2">
+                  onClick={handleScan}
                   disabled={!orgName.trim() || isScanning}
                   className="shrink-0"
-                    </span>
+                >
                   {isScanning ? (
                     <span className="flex items-center gap-2">
-                      Scan
-                      <ArrowRight size={16} />
+                      <div className="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" />
+                      Scanning
                     </span>
                   ) : (
                     <span className="flex items-center gap-2">
                       Scan
-            </CardContent>
-
+                      <ArrowRight size={16} />
+                    </span>
                   )}
-            <CardHeader className="pb-3">
-              </div>enter justify-between">
+                </Button>
+              </div>
             </CardContent>
-                  <Database size={18} />
-kens (Optional)
+          </Card>
+
           <Card className="bg-card border-border">
-            <CardHeader className="pb-3"> text-xs">
-                  {tokens.length} token{tokens.length !== 1 ? 's' : ''}
-                </Badge>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center justify-between">
+                <span className="flex items-center gap-2">
                   <Database size={18} />
                   PAT Tokens (Optional)
                 </span>
                 <Badge variant="secondary" className="font-mono text-xs">
-                Add PAT tokens to increase rate limits (5000 req/hr vs 60). Multiple tokens enable rotation.
+                  {tokens.length} token{tokens.length !== 1 ? 's' : ''}
                 </Badge>
-              <div className="flex gap-2">
-                  <Input
+              </CardTitle>
+            </CardHeader>
             <CardContent className="space-y-3">
-                    type={showTokens ? 'text' : 'password'}
+              <p className="text-xs text-muted-foreground">
                 Add PAT tokens to increase rate limits (5000 req/hr vs 60). Multiple tokens enable rotation.
-                    value={newToken}
-              <div className="flex gap-2">ue)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddToken()}
-                  <Inputr-10"
+              </p>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Input
                     id="new-token"
-                  <button
+                    type={showTokens ? 'text' : 'password'}
                     placeholder="ghp_xxxxxxxxxxxx"
                     value={newToken}
-                    onChange={(e) => setNewToken(e.target.value)}ground"
+                    onChange={(e) => setNewToken(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleAddToken()}
                     className="bg-input border-border font-mono pr-10"
-                  </button>
-                <Button variant="secondary" size="icon" onClick={handleAddToken} disabled={!newToken.trim()}>
+                  />
+                  <button
                     type="button"
                     onClick={() => setShowTokens(!showTokens)}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                   >
                     {showTokens ? <EyeSlash size={16} /> : <Eye size={16} />}
-                  {tokens.map((token, i) => (
+                  </button>
                 </div>
                 <Button variant="secondary" size="icon" onClick={handleAddToken} disabled={!newToken.trim()}>
-                  <Plus size={16} />4)}
-                </Button> isScanning && (
+                  <Plus size={16} />
+                </Button>
               </div>
-                        )}
+              {tokens.length > 0 && (
                 <div className="space-y-1">
-                      <button
+                  {tokens.map((token, i) => (
                     <div key={i} className="flex items-center justify-between bg-secondary/50 rounded px-3 py-1.5 text-xs">
                       <span className="font-mono text-muted-foreground">
                         {token.slice(0, 8)}...{token.slice(-4)}
-                        <X size={14} />
-                      </button>
-                    </div>
+                        {i === currentTokenIndex % tokens.length && isScanning && (
+                          <Badge variant="outline" className="ml-2 text-[10px]">active</Badge>
+                        )}
                       </span>
                       <button
                         onClick={() => handleRemoveToken(i)}
                         className="text-muted-foreground hover:text-destructive"
                       >
                         <X size={14} />
-
+                      </button>
                     </div>
-          <Card className="bg-card border-border">
+                  ))}
                 </div>
               )}
-                <div className="flex items-center justify-between text-sm">
-                    {progress.phase === 'error' ? (
-                      <Warning size={18} className="text-destructive" />
-                ) : progress.phase === 'complete' ? (
+            </CardContent>
+          </Card>
+        </div>
+
         {progress.phase !== 'idle' && (
-                    ) : (
-            <CardContent className="py-4">nimate-spin" />
+          <Card className="bg-card border-border">
+            <CardContent className="py-4">
               <div className="space-y-3">
-                    <span className="font-medium">
-                      {progress.phase === 'fetching-repos' && 'Fetching repositories...'}
-                      {progress.phase === 'checking-lfs' && `Checking for LFS: ${progress.currentRepo}`}
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2">
+                    {progress.phase === 'error' ? (
                       <Warning size={18} className="text-destructive" />
                     ) : progress.phase === 'complete' ? (
                       <CheckCircle size={18} className="text-accent" />
@@ -298,20 +297,20 @@ kens (Optional)
                     <span className="font-medium">
                       {progress.phase === 'fetching-repos' && 'Fetching repositories...'}
                       {progress.phase === 'checking-lfs' && `Checking for LFS: ${progress.currentRepo}`}
-                      </span>
+                      {progress.phase === 'complete' && 'Scan complete'}
+                      {progress.phase === 'error' && 'Error'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4 text-muted-foreground">
                     {progress.phase === 'checking-lfs' && (
                       <span>{progress.checkedRepos}/{progress.totalRepos} repos</span>
-                  </div>
-                  </div>
+                    )}
                     {rateLimit && (
                       <span className="flex items-center gap-1">
-                        <Clock size={14} />ing-lfs') && (
+                        <Clock size={14} />
                         {rateLimit.remaining}/{rateLimit.limit} requests
-                    <div 
-                      className="h-full bg-primary transition-all duration-300 ease-out"
-                    />
-                      <span>{progress.checkedRepos}/{progress.totalRepos} repos</span>
-                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-primary/30 to-transparent animate-scan" />
+                      </span>
+                    )}
                   </div>
                 </div>
                 
@@ -320,21 +319,21 @@ kens (Optional)
                     <div 
                       className="h-full bg-primary transition-all duration-300 ease-out"
                       style={{ width: `${progress.phase === 'fetching-repos' ? 5 : scanProgress}%` }}
-                )}
+                    />
                     {progress.phase === 'fetching-repos' && (
-                {progress.phase === 'complete' && (
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-primary/30 to-transparent animate-scan" />
                     )}
-                    <div className="flex gap-4 text-sm">
-                      <span>
-<span className="text-muted-foreground">Total repos:</span>{' '}
+                  </div>
+                )}
+
                 {progress.phase === 'error' && (
-                      </span>
+                  <Alert variant="destructive">
                     <AlertDescription>{progress.error}</AlertDescription>
-                        <span className="text-muted-foreground">LFS repos:</span>{' '}
-                )}ccent">{progress.lfsReposFound}</span>
-                   </span>
+                  </Alert>
+                )}
+
                 {progress.phase === 'complete' && (
-                    {lfsRepos.length > 0 && (
+                  <div className="flex items-center justify-between">
                     <div className="flex gap-4 text-sm">
                       <span>
                         <span className="text-muted-foreground">Total repos:</span>{' '}
@@ -343,80 +342,92 @@ kens (Optional)
                       <span>
                         <span className="text-muted-foreground">LFS repos:</span>{' '}
                         <span className="font-semibold text-accent">{progress.lfsReposFound}</span>
-            </CardContent>
-          </Card>
+                      </span>
+                    </div>
                     {lfsRepos.length > 0 && (
-
+                      <Button variant="secondary" size="sm" onClick={handleExport}>
                         <Download size={16} className="mr-2" />
-          <Card className="bg-card border-border">
+                        Export CSV
                       </Button>
                     )}
-                <CheckCircle size={18} className="text-accent" />
-                Repositories using LFS ({lfsRepos.length})
-              </CardTitle>
+                  </div>
+                )}
+              </div>
             </CardContent>
-          </Card>Content>
-                <div className="space-y-2">
+          </Card>
+        )}
 
-                    <div 
-                      key={repo.id}
-            <CardHeader className="pb-3">30 transition-colors"
+        {progress.phase === 'complete' && lfsRepos.length > 0 && (
+          <Card className="bg-card border-border">
+            <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
-                      <div className="flex items-start justify-between gap-4">
+                <CheckCircle size={18} className="text-accent" />
                 Repositories using LFS ({lfsRepos.length})
               </CardTitle>
             </CardHeader>
             <CardContent>
-                            rel="noopener noreferrer"
-                <div className="space-y-2">derline"
-                          >
+              <ScrollArea className="h-[400px]">
+                <div className="space-y-2">
+                  {lfsRepos.map(repo => (
                     <div 
                       key={repo.id}
-                          {repo.description && (
+                      className="p-3 bg-secondary/30 rounded-lg border border-border/30 hover:border-border/50 transition-colors"
                     >
-                              {repo.description}
-                          )}
-                          <div className="flex flex-wrap gap-1 mt-2">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0 flex-1">
+                          <a
                             href={repo.html_url}
-                              <Badge key={i} variant="outline" className="text-[10px] font-mono">
+                            target="_blank"
                             rel="noopener noreferrer"
                             className="font-medium text-primary hover:underline"
                           >
-                            {repo.lfsPatterns.length > 3 && (
-                                +{repo.lfsPatterns.length - 3} more
+                            {repo.full_name}
+                          </a>
                           {repo.description && (
-                            )}
+                            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                               {repo.description}
                             </p>
-                        <div className="text-right text-xs text-muted-foreground shrink-0">
+                          )}
                           <div className="flex flex-wrap gap-1 mt-2">
+                            {repo.lfsPatterns.slice(0, 3).map((pattern, i) => (
+                              <Badge key={i} variant="outline" className="text-[10px] font-mono">
+                                {pattern.length > 40 ? pattern.slice(0, 40) + '...' : pattern}
+                              </Badge>
+                            ))}
+                            {repo.lfsPatterns.length > 3 && (
+                              <Badge variant="outline" className="text-[10px]">
+                                +{repo.lfsPatterns.length - 3} more
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                        <div className="text-right text-xs text-muted-foreground shrink-0">
+                          <div>{(repo.size / 1024).toFixed(1)} MB</div>
                           <div>{new Date(repo.pushed_at).toLocaleDateString()}</div>
                         </div>
-                                {pattern.length > 40 ? pattern.slice(0, 40) + '...' : pattern}
+                      </div>
                     </div>
-                            ))}
+                  ))}
                 </div>
-                              <Badge variant="outline" className="text-[10px]">
+              </ScrollArea>
             </CardContent>
           </Card>
-                            )}
+        )}
 
         {progress.phase === 'complete' && lfsRepos.length === 0 && (
           <Card className="bg-card border-border">
             <CardContent className="py-12 text-center">
-                <Database size={32} className="text-muted-foreground" />
-                        </div>
+              <Database size={32} className="mx-auto mb-4 text-muted-foreground" />
               <h3 className="text-lg font-medium mb-2">No LFS repositories found</h3>
-                    </div>
+              <p className="text-sm text-muted-foreground max-w-md mx-auto">
                 Scanned {progress.totalRepos} repositories in <span className="font-mono">{orgName}</span> but none were using Git LFS.
-                </div>
-              </ScrollArea>
+              </p>
             </CardContent>
+          </Card>
         )}
-        )}
+      </div>
     </div>
-        {progress.phase === 'complete' && lfsRepos.length === 0 && (
+  )
 }
-            <CardContent className="py-12 text-center">
+
 export default App
-                <Database size={32} className="text-muted-foreground" />              <p className="text-sm text-muted-foreground max-w-md mx-auto">
