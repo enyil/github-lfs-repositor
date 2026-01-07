@@ -1,0 +1,227 @@
+export interface Repository {
+  id: number
+  name: string
+  full_name: string
+  html_url: string
+  description: string | null
+  size: number
+  default_branch: string
+  pushed_at: string
+  hasLfs: boolean | null
+  lfsPatterns: string[]
+}
+
+export interface ScanProgress {
+  phase: 'idle' | 'fetching-repos' | 'checking-lfs' | 'complete' | 'error'
+  totalRepos: number
+  fetchedRepos: number
+  checkedRepos: number
+  lfsReposFound: number
+  currentRepo: string
+  error: string | null
+  rateLimitRemaining: number
+  rateLimitReset: Date | null
+}
+
+export interface GitHubRateLimit {
+  remaining: number
+  limit: number
+  reset: Date
+}
+
+const LFS_PATTERNS = [
+  'filter=lfs',
+  'diff=lfs',
+  'merge=lfs'
+]
+
+export async function fetchOrgRepos(
+  org: string,
+  token: string | null,
+  onProgress: (repos: Repository[], page: number) => void,
+  onRateLimit: (limit: GitHubRateLimit) => void
+): Promise<Repository[]> {
+  const allRepos: Repository[] = []
+  let page = 1
+  const perPage = 100
+  let hasMore = true
+
+  while (hasMore) {
+    const headers: HeadersInit = {
+      'Accept': 'application/vnd.github+json',
+    }
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    }
+
+    const response = await fetch(
+      `https://api.github.com/orgs/${org}/repos?per_page=${perPage}&page=${page}&sort=pushed`,
+      { headers }
+    )
+
+    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
+    const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
+    const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+    onRateLimit({ remaining, limit, reset })
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error(`Organization "${org}" not found`)
+      }
+      if (response.status === 403 && remaining === 0) {
+        throw new Error(`Rate limit exceeded. Resets at ${reset.toLocaleTimeString()}`)
+      }
+      throw new Error(`GitHub API error: ${response.status}`)
+    }
+
+    const repos: any[] = await response.json()
+    
+    if (repos.length === 0) {
+      hasMore = false
+    } else {
+      const mappedRepos: Repository[] = repos.map(r => ({
+        id: r.id,
+        name: r.name,
+        full_name: r.full_name,
+        html_url: r.html_url,
+        description: r.description,
+        size: r.size,
+        default_branch: r.default_branch,
+        pushed_at: r.pushed_at,
+        hasLfs: null,
+        lfsPatterns: []
+      }))
+      
+      allRepos.push(...mappedRepos)
+      onProgress(allRepos, page)
+      
+      if (repos.length < perPage) {
+        hasMore = false
+      } else {
+        page++
+      }
+    }
+
+    if (remaining < 10) {
+      const waitTime = Math.max(0, reset.getTime() - Date.now())
+      if (waitTime > 0 && waitTime < 60000) {
+        await new Promise(resolve => setTimeout(resolve, waitTime + 1000))
+      }
+    }
+  }
+
+  return allRepos
+}
+
+export async function checkRepoForLfs(
+  repo: Repository,
+  token: string | null,
+  onRateLimit: (limit: GitHubRateLimit) => void
+): Promise<Repository> {
+  const headers: HeadersInit = {
+    'Accept': 'application/vnd.github.raw',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${repo.full_name}/contents/.gitattributes?ref=${repo.default_branch}`,
+      { headers }
+    )
+
+    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
+    const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
+    const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+    onRateLimit({ remaining, limit, reset })
+
+    if (response.status === 404) {
+      return { ...repo, hasLfs: false, lfsPatterns: [] }
+    }
+
+    if (!response.ok) {
+      return { ...repo, hasLfs: false, lfsPatterns: [] }
+    }
+
+    const content = await response.text()
+    const foundPatterns: string[] = []
+    
+    for (const pattern of LFS_PATTERNS) {
+      if (content.includes(pattern)) {
+        const lines = content.split('\n')
+        for (const line of lines) {
+          if (line.includes(pattern) && !foundPatterns.includes(line.trim())) {
+            foundPatterns.push(line.trim())
+          }
+        }
+      }
+    }
+
+    return {
+      ...repo,
+      hasLfs: foundPatterns.length > 0,
+      lfsPatterns: foundPatterns
+    }
+  } catch {
+    return { ...repo, hasLfs: false, lfsPatterns: [] }
+  }
+}
+
+export async function checkAllReposForLfs(
+  repos: Repository[],
+  token: string | null,
+  onProgress: (checked: number, current: string, lfsFound: number) => void,
+  onRateLimit: (limit: GitHubRateLimit) => void
+): Promise<Repository[]> {
+  const results: Repository[] = []
+  let lfsCount = 0
+  const concurrency = token ? 5 : 2
+
+  for (let i = 0; i < repos.length; i += concurrency) {
+    const batch = repos.slice(i, i + concurrency)
+    const batchResults = await Promise.all(
+      batch.map(repo => checkRepoForLfs(repo, token, onRateLimit))
+    )
+    
+    for (const result of batchResults) {
+      results.push(result)
+      if (result.hasLfs) lfsCount++
+    }
+    
+    onProgress(results.length, batch[batch.length - 1]?.name || '', lfsCount)
+    
+    if (i + concurrency < repos.length) {
+      await new Promise(resolve => setTimeout(resolve, token ? 100 : 500))
+    }
+  }
+
+  return results
+}
+
+export function generateCsv(repos: Repository[]): string {
+  const lfsRepos = repos.filter(r => r.hasLfs)
+  const headers = ['Repository', 'URL', 'Description', 'Size (KB)', 'Last Pushed', 'LFS Patterns']
+  const rows = lfsRepos.map(r => [
+    r.full_name,
+    r.html_url,
+    `"${(r.description || '').replace(/"/g, '""')}"`,
+    r.size.toString(),
+    r.pushed_at,
+    `"${r.lfsPatterns.join('; ').replace(/"/g, '""')}"`
+  ])
+  
+  return [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+}
+
+export function downloadCsv(content: string, filename: string): void {
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
