@@ -388,6 +388,15 @@ function App() {
                               {repo.description}
                             </p>
                           )}
+                          {repo.lfsLocations.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-2">
+                              {repo.lfsLocations.map((location, i) => (
+                                <Badge key={i} variant="secondary" className="text-[10px] font-mono">
+                                  {location}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
                           <div className="flex flex-wrap gap-1 mt-2">
                             {repo.lfsPatterns.slice(0, 3).map((pattern, i) => (
                               <Badge key={i} variant="outline" className="text-[10px] font-mono">

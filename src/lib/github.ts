@@ -9,6 +9,7 @@ export interface Repository {
   pushed_at: string
   hasLfs: boolean | null
   lfsPatterns: string[]
+  lfsLocations: string[]
 }
 
 export interface ScanProgress {
@@ -27,6 +28,12 @@ export interface GitHubRateLimit {
   remaining: number
   limit: number
   reset: Date
+}
+
+interface GitTreeItem {
+  path: string
+  type: string
+  sha: string
 }
 
 const LFS_PATTERNS = [
@@ -89,7 +96,8 @@ export async function fetchOrgRepos(
         default_branch: r.default_branch,
         pushed_at: r.pushed_at,
         hasLfs: null,
-        lfsPatterns: []
+        lfsPatterns: [],
+        lfsLocations: []
       }))
       
       allRepos.push(...mappedRepos)
@@ -119,40 +127,66 @@ export async function checkRepoForLfs(
   onRateLimit: (limit: GitHubRateLimit) => void
 ): Promise<Repository> {
   const headers: HeadersInit = {
-    'Accept': 'application/vnd.github.raw',
+    'Accept': 'application/vnd.github+json',
   }
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
 
   try {
-    const response = await fetch(
-      `https://api.github.com/repos/${repo.full_name}/contents/.gitattributes?ref=${repo.default_branch}`,
+    const treeResponse = await fetch(
+      `https://api.github.com/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
       { headers }
     )
 
-    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
-    const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
-    const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+    const remaining = parseInt(treeResponse.headers.get('x-ratelimit-remaining') || '0')
+    const limit = parseInt(treeResponse.headers.get('x-ratelimit-limit') || '60')
+    const reset = new Date(parseInt(treeResponse.headers.get('x-ratelimit-reset') || '0') * 1000)
     onRateLimit({ remaining, limit, reset })
 
-    if (response.status === 404) {
-      return { ...repo, hasLfs: false, lfsPatterns: [] }
+    if (!treeResponse.ok) {
+      return { ...repo, hasLfs: false, lfsPatterns: [], lfsLocations: [] }
     }
 
-    if (!response.ok) {
-      return { ...repo, hasLfs: false, lfsPatterns: [] }
+    const treeData = await treeResponse.json()
+    const gitattributesFiles: GitTreeItem[] = (treeData.tree || []).filter(
+      (item: GitTreeItem) => item.type === 'blob' && item.path.endsWith('.gitattributes')
+    )
+
+    if (gitattributesFiles.length === 0) {
+      return { ...repo, hasLfs: false, lfsPatterns: [], lfsLocations: [] }
     }
 
-    const content = await response.text()
-    const foundPatterns: string[] = []
-    
-    for (const pattern of LFS_PATTERNS) {
-      if (content.includes(pattern)) {
-        const lines = content.split('\n')
-        for (const line of lines) {
-          if (line.includes(pattern) && !foundPatterns.includes(line.trim())) {
-            foundPatterns.push(line.trim())
+    const allPatterns: string[] = []
+    const lfsLocations: string[] = []
+
+    for (const file of gitattributesFiles) {
+      const contentHeaders: HeadersInit = {
+        'Accept': 'application/vnd.github.raw',
+      }
+      if (token) {
+        contentHeaders['Authorization'] = `Bearer ${token}`
+      }
+
+      const contentResponse = await fetch(
+        `https://api.github.com/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
+        { headers: contentHeaders }
+      )
+
+      if (!contentResponse.ok) continue
+
+      const content = await contentResponse.text()
+      
+      for (const pattern of LFS_PATTERNS) {
+        if (content.includes(pattern)) {
+          const lines = content.split('\n')
+          for (const line of lines) {
+            if (line.includes(pattern) && !allPatterns.includes(line.trim())) {
+              allPatterns.push(line.trim())
+              if (!lfsLocations.includes(file.path)) {
+                lfsLocations.push(file.path)
+              }
+            }
           }
         }
       }
@@ -160,11 +194,12 @@ export async function checkRepoForLfs(
 
     return {
       ...repo,
-      hasLfs: foundPatterns.length > 0,
-      lfsPatterns: foundPatterns
+      hasLfs: allPatterns.length > 0,
+      lfsPatterns: allPatterns,
+      lfsLocations
     }
   } catch {
-    return { ...repo, hasLfs: false, lfsPatterns: [] }
+    return { ...repo, hasLfs: false, lfsPatterns: [], lfsLocations: [] }
   }
 }
 
@@ -201,13 +236,14 @@ export async function checkAllReposForLfs(
 
 export function generateCsv(repos: Repository[]): string {
   const lfsRepos = repos.filter(r => r.hasLfs)
-  const headers = ['Repository', 'URL', 'Description', 'Size (KB)', 'Last Pushed', 'LFS Patterns']
+  const headers = ['Repository', 'URL', 'Description', 'Size (KB)', 'Last Pushed', 'LFS Locations', 'LFS Patterns']
   const rows = lfsRepos.map(r => [
     r.full_name,
     r.html_url,
     `"${(r.description || '').replace(/"/g, '""')}"`,
     r.size.toString(),
     r.pushed_at,
+    `"${r.lfsLocations.join('; ').replace(/"/g, '""')}"`,
     `"${r.lfsPatterns.join('; ').replace(/"/g, '""')}"`
   ])
   
