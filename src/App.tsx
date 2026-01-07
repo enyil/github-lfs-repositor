@@ -1,5 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
-import { useKV } from '@github/spark/hooks'
+import { useState, useCallback } from 'react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -32,16 +31,7 @@ import {
 
 function App() {
   const [orgName, setOrgName] = useState('')
-  const [userId, setUserId] = useState<string | null>(null)
-  
-  useEffect(() => {
-    window.spark.user().then(user => {
-      if (user?.id) setUserId(String(user.id))
-    })
-  }, [])
-  
-  const [storedTokens, setStoredTokens] = useKV<string[]>(userId ? `github-tokens-${userId}` : '', [])
-  const tokens = storedTokens ?? []
+  const [tokens, setTokens] = useState<string[]>([])
   const [newToken, setNewToken] = useState('')
   const [showTokens, setShowTokens] = useState(false)
   const [repos, setRepos] = useState<Repository[]>([])
@@ -72,13 +62,13 @@ function App() {
 
   const handleAddToken = () => {
     if (newToken.trim() && !tokens.includes(newToken.trim())) {
-      setStoredTokens(current => [...(current ?? []), newToken.trim()])
+      setTokens(current => [...current, newToken.trim()])
       setNewToken('')
     }
   }
 
   const handleRemoveToken = (index: number) => {
-    setStoredTokens(current => (current ?? []).filter((_, i) => i !== index))
+    setTokens(current => current.filter((_, i) => i !== index))
   }
 
   const handleRateLimit = useCallback((limit: GitHubRateLimit) => {
