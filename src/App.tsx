@@ -24,7 +24,7 @@ import {
   ScanProgress,
   GitHubRateLimit,
   fetchOrgRepos,
-  checkAllReposForLfs,
+  checkAllReposForJfrog,
   generateCsv,
   downloadCsv
 } from '@/lib/github'
@@ -40,7 +40,7 @@ function App() {
     totalRepos: 0,
     fetchedRepos: 0,
     checkedRepos: 0,
-    lfsReposFound: 0,
+    jfrogReposFound: 0,
     currentRepo: '',
     error: null,
     rateLimitRemaining: 60,
@@ -93,7 +93,7 @@ function App() {
       totalRepos: 0,
       fetchedRepos: 0,
       checkedRepos: 0,
-      lfsReposFound: 0,
+      jfrogReposFound: 0,
       currentRepo: '',
       error: null,
       rateLimitRemaining: rateLimit?.remaining || 60,
@@ -121,15 +121,15 @@ function App() {
         totalRepos: allRepos.length
       }))
 
-      const checkedRepos = await checkAllReposForLfs(
+      const checkedRepos = await checkAllReposForJfrog(
         allRepos,
         getCurrentToken(),
-        (checked, current, lfsFound) => {
+        (checked, current, jfrogFound) => {
           setProgress(prev => ({
             ...prev,
             checkedRepos: checked,
             currentRepo: current,
-            lfsReposFound: lfsFound
+            jfrogReposFound: jfrogFound
           }))
         },
         handleRateLimit
@@ -140,7 +140,7 @@ function App() {
         ...prev,
         phase: 'complete',
         checkedRepos: checkedRepos.length,
-        lfsReposFound: checkedRepos.filter(r => r.hasLfs).length
+        jfrogReposFound: checkedRepos.filter(r => r.hasJfrog).length
       }))
     } catch (error) {
       setProgress(prev => ({
@@ -152,12 +152,12 @@ function App() {
   }
 
   const handleExport = () => {
-    const lfsRepos = repos.filter(r => r.hasLfs)
-    const csv = generateCsv(lfsRepos)
-    downloadCsv(csv, `${orgName}-lfs-repos-${new Date().toISOString().split('T')[0]}.csv`)
+    const jfrogRepos = repos.filter(r => r.hasJfrog)
+    const csv = generateCsv(jfrogRepos)
+    downloadCsv(csv, `${orgName}-jfrog-repos-${new Date().toISOString().split('T')[0]}.csv`)
   }
 
-  const lfsRepos = repos.filter(r => r.hasLfs)
+  const jfrogRepos = repos.filter(r => r.hasJfrog)
   const isScanning = progress.phase === 'fetching-repos' || progress.phase === 'checking-lfs'
   const scanProgress = progress.totalRepos > 0 
     ? Math.round((progress.checkedRepos / progress.totalRepos) * 100)
@@ -171,8 +171,8 @@ function App() {
             <GithubLogo size={32} className="text-primary" />
           </div>
           <div>
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">LFS Repository Finder</h1>
-            <p className="text-muted-foreground text-sm">Scan large GitHub organizations for Git LFS usage</p>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">JFrog LFS Finder</h1>
+            <p className="text-muted-foreground text-sm">Scan GitHub organizations for repos using JFrog LFS</p>
           </div>
         </header>
 
@@ -294,7 +294,7 @@ function App() {
                     )}
                     <span className="font-medium">
                       {progress.phase === 'fetching-repos' && 'Fetching repositories...'}
-                      {progress.phase === 'checking-lfs' && `Checking for LFS: ${progress.currentRepo}`}
+                      {progress.phase === 'checking-lfs' && `Checking for JFrog config: ${progress.currentRepo}`}
                       {progress.phase === 'complete' && 'Scan complete'}
                       {progress.phase === 'error' && 'Error'}
                     </span>
@@ -338,11 +338,11 @@ function App() {
                         <span className="font-semibold">{progress.totalRepos}</span>
                       </span>
                       <span>
-                        <span className="text-muted-foreground">LFS repos:</span>{' '}
-                        <span className="font-semibold text-accent">{progress.lfsReposFound}</span>
+                        <span className="text-muted-foreground">JFrog repos:</span>{' '}
+                        <span className="font-semibold text-accent">{progress.jfrogReposFound}</span>
                       </span>
                     </div>
-                    {lfsRepos.length > 0 && (
+                    {jfrogRepos.length > 0 && (
                       <Button variant="secondary" size="sm" onClick={handleExport}>
                         <Download size={16} className="mr-2" />
                         Export CSV
@@ -355,18 +355,18 @@ function App() {
           </Card>
         )}
 
-        {progress.phase === 'complete' && lfsRepos.length > 0 && (
+        {progress.phase === 'complete' && jfrogRepos.length > 0 && (
           <Card className="bg-card border-border">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <CheckCircle size={18} className="text-accent" />
-                Repositories using LFS ({lfsRepos.length})
+                Repositories with JFrog LFS Config ({jfrogRepos.length})
               </CardTitle>
             </CardHeader>
             <CardContent>
               <ScrollArea className="h-[400px]">
                 <div className="space-y-2">
-                  {lfsRepos.map(repo => (
+                  {jfrogRepos.map(repo => (
                     <div 
                       key={repo.id}
                       className="p-3 bg-secondary/30 rounded-lg border border-border/30 hover:border-border/50 transition-colors"
@@ -386,9 +386,9 @@ function App() {
                               {repo.description}
                             </p>
                           )}
-                          {repo.lfsLocations.length > 0 && (
+                          {repo.configLocations.length > 0 && (
                             <div className="flex flex-wrap gap-1 mt-2">
-                              {repo.lfsLocations.map((location, i) => (
+                              {repo.configLocations.map((location, i) => (
                                 <Badge key={i} variant="secondary" className="text-[10px] font-mono">
                                   {location}
                                 </Badge>
@@ -396,14 +396,14 @@ function App() {
                             </div>
                           )}
                           <div className="flex flex-wrap gap-1 mt-2">
-                            {repo.lfsPatterns.slice(0, 3).map((pattern, i) => (
+                            {repo.jfrogUrls.slice(0, 3).map((url, i) => (
                               <Badge key={i} variant="outline" className="text-[10px] font-mono">
-                                {pattern.length > 40 ? pattern.slice(0, 40) + '...' : pattern}
+                                {url.length > 40 ? url.slice(0, 40) + '...' : url}
                               </Badge>
                             ))}
-                            {repo.lfsPatterns.length > 3 && (
+                            {repo.jfrogUrls.length > 3 && (
                               <Badge variant="outline" className="text-[10px]">
-                                +{repo.lfsPatterns.length - 3} more
+                                +{repo.jfrogUrls.length - 3} more
                               </Badge>
                             )}
                           </div>
@@ -421,13 +421,13 @@ function App() {
           </Card>
         )}
 
-        {progress.phase === 'complete' && lfsRepos.length === 0 && (
+        {progress.phase === 'complete' && jfrogRepos.length === 0 && (
           <Card className="bg-card border-border">
             <CardContent className="py-12 text-center">
               <Database size={32} className="mx-auto mb-4 text-muted-foreground" />
-              <h3 className="text-lg font-medium mb-2">No LFS repositories found</h3>
+              <h3 className="text-lg font-medium mb-2">No JFrog LFS repositories found</h3>
               <p className="text-sm text-muted-foreground max-w-md mx-auto">
-                Scanned {progress.totalRepos} repositories in <span className="font-mono">{orgName}</span> but none were using Git LFS.
+                Scanned {progress.totalRepos} repositories in <span className="font-mono">{orgName}</span> but none had .lfsconfig files containing JFrog.
               </p>
             </CardContent>
           </Card>

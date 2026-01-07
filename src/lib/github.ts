@@ -7,9 +7,9 @@ export interface Repository {
   size: number
   default_branch: string
   pushed_at: string
-  hasLfs: boolean | null
-  lfsPatterns: string[]
-  lfsLocations: string[]
+  hasJfrog: boolean | null
+  jfrogUrls: string[]
+  configLocations: string[]
 }
 
 export interface ScanProgress {
@@ -17,7 +17,7 @@ export interface ScanProgress {
   totalRepos: number
   fetchedRepos: number
   checkedRepos: number
-  lfsReposFound: number
+  jfrogReposFound: number
   currentRepo: string
   error: string | null
   rateLimitRemaining: number
@@ -35,12 +35,6 @@ interface GitTreeItem {
   type: string
   sha: string
 }
-
-const LFS_PATTERNS = [
-  'filter=lfs',
-  'diff=lfs',
-  'merge=lfs'
-]
 
 export async function fetchOrgRepos(
   org: string,
@@ -95,9 +89,9 @@ export async function fetchOrgRepos(
         size: r.size,
         default_branch: r.default_branch,
         pushed_at: r.pushed_at,
-        hasLfs: null,
-        lfsPatterns: [],
-        lfsLocations: []
+        hasJfrog: null,
+        jfrogUrls: [],
+        configLocations: []
       }))
       
       allRepos.push(...mappedRepos)
@@ -121,7 +115,7 @@ export async function fetchOrgRepos(
   return allRepos
 }
 
-export async function checkRepoForLfs(
+export async function checkRepoForJfrog(
   repo: Repository,
   token: string | null,
   onRateLimit: (limit: GitHubRateLimit) => void
@@ -145,22 +139,22 @@ export async function checkRepoForLfs(
     onRateLimit({ remaining, limit, reset })
 
     if (!treeResponse.ok) {
-      return { ...repo, hasLfs: false, lfsPatterns: [], lfsLocations: [] }
+      return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
     }
 
     const treeData = await treeResponse.json()
-    const gitattributesFiles: GitTreeItem[] = (treeData.tree || []).filter(
-      (item: GitTreeItem) => item.type === 'blob' && item.path.endsWith('.gitattributes')
+    const lfsConfigFiles: GitTreeItem[] = (treeData.tree || []).filter(
+      (item: GitTreeItem) => item.type === 'blob' && item.path.endsWith('.lfsconfig')
     )
 
-    if (gitattributesFiles.length === 0) {
-      return { ...repo, hasLfs: false, lfsPatterns: [], lfsLocations: [] }
+    if (lfsConfigFiles.length === 0) {
+      return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
     }
 
-    const allPatterns: string[] = []
-    const lfsLocations: string[] = []
+    const jfrogUrls: string[] = []
+    const configLocations: string[] = []
 
-    for (const file of gitattributesFiles) {
+    for (const file of lfsConfigFiles) {
       const contentHeaders: HeadersInit = {
         'Accept': 'application/vnd.github.raw',
       }
@@ -177,15 +171,13 @@ export async function checkRepoForLfs(
 
       const content = await contentResponse.text()
       
-      for (const pattern of LFS_PATTERNS) {
-        if (content.includes(pattern)) {
-          const lines = content.split('\n')
-          for (const line of lines) {
-            if (line.includes(pattern) && !allPatterns.includes(line.trim())) {
-              allPatterns.push(line.trim())
-              if (!lfsLocations.includes(file.path)) {
-                lfsLocations.push(file.path)
-              }
+      if (content.toLowerCase().includes('jfrog')) {
+        const lines = content.split('\n')
+        for (const line of lines) {
+          if (line.toLowerCase().includes('jfrog') && !jfrogUrls.includes(line.trim())) {
+            jfrogUrls.push(line.trim())
+            if (!configLocations.includes(file.path)) {
+              configLocations.push(file.path)
             }
           }
         }
@@ -194,37 +186,37 @@ export async function checkRepoForLfs(
 
     return {
       ...repo,
-      hasLfs: allPatterns.length > 0,
-      lfsPatterns: allPatterns,
-      lfsLocations
+      hasJfrog: jfrogUrls.length > 0,
+      jfrogUrls,
+      configLocations
     }
   } catch {
-    return { ...repo, hasLfs: false, lfsPatterns: [], lfsLocations: [] }
+    return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
   }
 }
 
-export async function checkAllReposForLfs(
+export async function checkAllReposForJfrog(
   repos: Repository[],
   token: string | null,
-  onProgress: (checked: number, current: string, lfsFound: number) => void,
+  onProgress: (checked: number, current: string, jfrogFound: number) => void,
   onRateLimit: (limit: GitHubRateLimit) => void
 ): Promise<Repository[]> {
   const results: Repository[] = []
-  let lfsCount = 0
+  let jfrogCount = 0
   const concurrency = token ? 5 : 2
 
   for (let i = 0; i < repos.length; i += concurrency) {
     const batch = repos.slice(i, i + concurrency)
     const batchResults = await Promise.all(
-      batch.map(repo => checkRepoForLfs(repo, token, onRateLimit))
+      batch.map(repo => checkRepoForJfrog(repo, token, onRateLimit))
     )
     
     for (const result of batchResults) {
       results.push(result)
-      if (result.hasLfs) lfsCount++
+      if (result.hasJfrog) jfrogCount++
     }
     
-    onProgress(results.length, batch[batch.length - 1]?.name || '', lfsCount)
+    onProgress(results.length, batch[batch.length - 1]?.name || '', jfrogCount)
     
     if (i + concurrency < repos.length) {
       await new Promise(resolve => setTimeout(resolve, token ? 100 : 500))
@@ -235,16 +227,16 @@ export async function checkAllReposForLfs(
 }
 
 export function generateCsv(repos: Repository[]): string {
-  const lfsRepos = repos.filter(r => r.hasLfs)
-  const headers = ['Repository', 'URL', 'Description', 'Size (KB)', 'Last Pushed', 'LFS Locations', 'LFS Patterns']
-  const rows = lfsRepos.map(r => [
+  const jfrogRepos = repos.filter(r => r.hasJfrog)
+  const headers = ['Repository', 'URL', 'Description', 'Size (KB)', 'Last Pushed', 'Config Locations', 'JFrog URLs']
+  const rows = jfrogRepos.map(r => [
     r.full_name,
     r.html_url,
     `"${(r.description || '').replace(/"/g, '""')}"`,
     r.size.toString(),
     r.pushed_at,
-    `"${r.lfsLocations.join('; ').replace(/"/g, '""')}"`,
-    `"${r.lfsPatterns.join('; ').replace(/"/g, '""')}"`
+    `"${r.configLocations.join('; ').replace(/"/g, '""')}"`,
+    `"${r.jfrogUrls.join('; ').replace(/"/g, '""')}"`
   ])
   
   return [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
