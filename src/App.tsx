@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useKV } from '@github/spark/hooks'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -32,7 +32,15 @@ import {
 
 function App() {
   const [orgName, setOrgName] = useState('')
-  const [storedTokens, setStoredTokens] = useKV<string[]>('github-tokens', [])
+  const [userId, setUserId] = useState<string | null>(null)
+  
+  useEffect(() => {
+    window.spark.user().then(user => {
+      if (user?.id) setUserId(String(user.id))
+    })
+  }, [])
+  
+  const [storedTokens, setStoredTokens] = useKV<string[]>(userId ? `github-tokens-${userId}` : '', [])
   const tokens = storedTokens ?? []
   const [newToken, setNewToken] = useState('')
   const [showTokens, setShowTokens] = useState(false)
