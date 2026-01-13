@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -49,17 +49,22 @@ function App() {
   })
   const [rateLimit, setRateLimit] = useState<GitHubRateLimit | null>(null)
   const [currentTokenIndex, setCurrentTokenIndex] = useState(0)
+  const tokenIndexRef = useRef(0)
+  const tokensRef = useRef<string[]>([])
+
+  tokensRef.current = tokens
 
   const getCurrentToken = useCallback(() => {
-    if (tokens.length === 0) return null
-    return tokens[currentTokenIndex % tokens.length]
-  }, [tokens, currentTokenIndex])
+    if (tokensRef.current.length === 0) return null
+    return tokensRef.current[tokenIndexRef.current % tokensRef.current.length]
+  }, [])
 
   const rotateToken = useCallback(() => {
-    if (tokens.length > 1) {
-      setCurrentTokenIndex(prev => (prev + 1) % tokens.length)
+    if (tokensRef.current.length > 1) {
+      tokenIndexRef.current = (tokenIndexRef.current + 1) % tokensRef.current.length
+      setCurrentTokenIndex(tokenIndexRef.current)
     }
-  }, [tokens.length])
+  }, [])
 
   const handleAddToken = () => {
     if (newToken.trim() && !tokens.includes(newToken.trim())) {
@@ -80,10 +85,10 @@ function App() {
       rateLimitReset: limit.reset
     }))
 
-    if (limit.remaining < 50 && tokens.length > 1) {
+    if (limit.remaining < 50 && tokensRef.current.length > 1) {
       rotateToken()
     }
-  }, [tokens.length, rotateToken])
+  }, [rotateToken])
 
   const handleScan = async () => {
     if (!orgName.trim()) return
@@ -104,7 +109,7 @@ function App() {
     try {
       const allRepos = await fetchOrgRepos(
         orgName.trim(),
-        getCurrentToken(),
+        getCurrentToken,
         (fetchedRepos, page) => {
           setProgress(prev => ({
             ...prev,
@@ -124,7 +129,7 @@ function App() {
 
       const scanResult = await checkAllReposForJfrog(
         allRepos,
-        getCurrentToken(),
+        getCurrentToken,
         (checked, current, jfrogFound) => {
           setProgress(prev => ({
             ...prev,

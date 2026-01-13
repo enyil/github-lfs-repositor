@@ -47,7 +47,7 @@ interface GitTreeItem {
 
 export async function fetchOrgRepos(
   org: string,
-  token: string | null,
+  getToken: () => string | null,
   onProgress: (repos: Repository[], page: number) => void,
   onRateLimit: (limit: GitHubRateLimit) => void
 ): Promise<Repository[]> {
@@ -57,6 +57,7 @@ export async function fetchOrgRepos(
   let hasMore = true
 
   while (hasMore) {
+    const token = getToken()
     const headers: HeadersInit = {
       'Accept': 'application/vnd.github+json',
     }
@@ -136,9 +137,10 @@ function checkRateLimitResponse(response: Response): void {
 
 export async function checkRepoForJfrog(
   repo: Repository,
-  token: string | null,
+  getToken: () => string | null,
   onRateLimit: (limit: GitHubRateLimit) => void
 ): Promise<Repository> {
+  const token = getToken()
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github+json',
   }
@@ -175,11 +177,12 @@ export async function checkRepoForJfrog(
   const configLocations: string[] = []
 
   for (const file of lfsConfigFiles) {
+    const currentToken = getToken()
     const contentHeaders: HeadersInit = {
       'Accept': 'application/vnd.github.raw',
     }
-    if (token) {
-      contentHeaders['Authorization'] = `Bearer ${token}`
+    if (currentToken) {
+      contentHeaders['Authorization'] = `Bearer ${currentToken}`
     }
 
     const contentResponse = await fetch(
@@ -222,12 +225,13 @@ export interface ScanResult {
 
 export async function checkAllReposForJfrog(
   repos: Repository[],
-  token: string | null,
+  getToken: () => string | null,
   onProgress: (checked: number, current: string, jfrogFound: number) => void,
   onRateLimit: (limit: GitHubRateLimit) => void
 ): Promise<ScanResult> {
   const results: Repository[] = []
   let jfrogCount = 0
+  const token = getToken()
   const concurrency = token ? 5 : 2
 
   for (let i = 0; i < repos.length; i += concurrency) {
@@ -235,7 +239,7 @@ export async function checkAllReposForJfrog(
     
     try {
       const batchResults = await Promise.all(
-        batch.map(repo => checkRepoForJfrog(repo, token, onRateLimit))
+        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit))
       )
       
       for (const result of batchResults) {
