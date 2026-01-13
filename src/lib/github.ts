@@ -13,7 +13,7 @@ export interface Repository {
 }
 
 export interface ScanProgress {
-  phase: 'idle' | 'fetching-repos' | 'checking-lfs' | 'complete' | 'error'
+  phase: 'idle' | 'fetching-repos' | 'checking-lfs' | 'complete' | 'partial' | 'error'
   totalRepos: number
   fetchedRepos: number
   checkedRepos: number
@@ -28,6 +28,15 @@ export interface GitHubRateLimit {
   remaining: number
   limit: number
   reset: Date
+}
+
+export class RateLimitError extends Error {
+  resetTime: Date
+  constructor(resetTime: Date) {
+    super(`Rate limit exceeded. Resets at ${resetTime.toLocaleTimeString()}`)
+    this.name = 'RateLimitError'
+    this.resetTime = resetTime
+  }
 }
 
 interface GitTreeItem {
@@ -115,6 +124,16 @@ export async function fetchOrgRepos(
   return allRepos
 }
 
+function checkRateLimitResponse(response: Response): void {
+  if (response.status === 403) {
+    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
+    if (remaining === 0) {
+      const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+      throw new RateLimitError(reset)
+    }
+  }
+}
+
 export async function checkRepoForJfrog(
   repo: Repository,
   token: string | null,
@@ -127,72 +146,78 @@ export async function checkRepoForJfrog(
     headers['Authorization'] = `Bearer ${token}`
   }
 
-  try {
-    const treeResponse = await fetch(
-      `https://api.github.com/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
-      { headers }
-    )
+  const treeResponse = await fetch(
+    `https://api.github.com/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
+    { headers }
+  )
 
-    const remaining = parseInt(treeResponse.headers.get('x-ratelimit-remaining') || '0')
-    const limit = parseInt(treeResponse.headers.get('x-ratelimit-limit') || '60')
-    const reset = new Date(parseInt(treeResponse.headers.get('x-ratelimit-reset') || '0') * 1000)
-    onRateLimit({ remaining, limit, reset })
+  const remaining = parseInt(treeResponse.headers.get('x-ratelimit-remaining') || '0')
+  const limit = parseInt(treeResponse.headers.get('x-ratelimit-limit') || '60')
+  const reset = new Date(parseInt(treeResponse.headers.get('x-ratelimit-reset') || '0') * 1000)
+  onRateLimit({ remaining, limit, reset })
 
-    if (!treeResponse.ok) {
-      return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
+  checkRateLimitResponse(treeResponse)
+
+  if (!treeResponse.ok) {
+    return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
+  }
+
+  const treeData = await treeResponse.json()
+  const lfsConfigFiles: GitTreeItem[] = (treeData.tree || []).filter(
+    (item: GitTreeItem) => item.type === 'blob' && item.path.endsWith('.lfsconfig')
+  )
+
+  if (lfsConfigFiles.length === 0) {
+    return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
+  }
+
+  const jfrogUrls: string[] = []
+  const configLocations: string[] = []
+
+  for (const file of lfsConfigFiles) {
+    const contentHeaders: HeadersInit = {
+      'Accept': 'application/vnd.github.raw',
+    }
+    if (token) {
+      contentHeaders['Authorization'] = `Bearer ${token}`
     }
 
-    const treeData = await treeResponse.json()
-    const lfsConfigFiles: GitTreeItem[] = (treeData.tree || []).filter(
-      (item: GitTreeItem) => item.type === 'blob' && item.path.endsWith('.lfsconfig')
+    const contentResponse = await fetch(
+      `https://api.github.com/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
+      { headers: contentHeaders }
     )
 
-    if (lfsConfigFiles.length === 0) {
-      return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
-    }
+    checkRateLimitResponse(contentResponse)
 
-    const jfrogUrls: string[] = []
-    const configLocations: string[] = []
+    if (!contentResponse.ok) continue
 
-    for (const file of lfsConfigFiles) {
-      const contentHeaders: HeadersInit = {
-        'Accept': 'application/vnd.github.raw',
-      }
-      if (token) {
-        contentHeaders['Authorization'] = `Bearer ${token}`
-      }
-
-      const contentResponse = await fetch(
-        `https://api.github.com/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
-        { headers: contentHeaders }
-      )
-
-      if (!contentResponse.ok) continue
-
-      const content = await contentResponse.text()
-      
-      if (content.toLowerCase().includes('jfrog')) {
-        const lines = content.split('\n')
-        for (const line of lines) {
-          if (line.toLowerCase().includes('jfrog') && !jfrogUrls.includes(line.trim())) {
-            jfrogUrls.push(line.trim())
-            if (!configLocations.includes(file.path)) {
-              configLocations.push(file.path)
-            }
+    const content = await contentResponse.text()
+    
+    if (content.toLowerCase().includes('jfrog')) {
+      const lines = content.split('\n')
+      for (const line of lines) {
+        if (line.toLowerCase().includes('jfrog') && !jfrogUrls.includes(line.trim())) {
+          jfrogUrls.push(line.trim())
+          if (!configLocations.includes(file.path)) {
+            configLocations.push(file.path)
           }
         }
       }
     }
-
-    return {
-      ...repo,
-      hasJfrog: jfrogUrls.length > 0,
-      jfrogUrls,
-      configLocations
-    }
-  } catch {
-    return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
   }
+
+  return {
+    ...repo,
+    hasJfrog: jfrogUrls.length > 0,
+    jfrogUrls,
+    configLocations
+  }
+}
+
+export interface ScanResult {
+  repos: Repository[]
+  isPartial: boolean
+  rateLimitReset?: Date
 }
 
 export async function checkAllReposForJfrog(
@@ -200,30 +225,45 @@ export async function checkAllReposForJfrog(
   token: string | null,
   onProgress: (checked: number, current: string, jfrogFound: number) => void,
   onRateLimit: (limit: GitHubRateLimit) => void
-): Promise<Repository[]> {
+): Promise<ScanResult> {
   const results: Repository[] = []
   let jfrogCount = 0
   const concurrency = token ? 5 : 2
 
   for (let i = 0; i < repos.length; i += concurrency) {
     const batch = repos.slice(i, i + concurrency)
-    const batchResults = await Promise.all(
-      batch.map(repo => checkRepoForJfrog(repo, token, onRateLimit))
-    )
     
-    for (const result of batchResults) {
-      results.push(result)
-      if (result.hasJfrog) jfrogCount++
+    try {
+      const batchResults = await Promise.all(
+        batch.map(repo => checkRepoForJfrog(repo, token, onRateLimit))
+      )
+      
+      for (const result of batchResults) {
+        results.push(result)
+        if (result.hasJfrog) jfrogCount++
+      }
+      
+      onProgress(results.length, batch[batch.length - 1]?.name || '', jfrogCount)
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        return {
+          repos: results,
+          isPartial: true,
+          rateLimitReset: error.resetTime
+        }
+      }
+      throw error
     }
-    
-    onProgress(results.length, batch[batch.length - 1]?.name || '', jfrogCount)
     
     if (i + concurrency < repos.length) {
       await new Promise(resolve => setTimeout(resolve, token ? 100 : 500))
     }
   }
 
-  return results
+  return {
+    repos: results,
+    isPartial: false
+  }
 }
 
 export function generateCsv(repos: Repository[]): string {

@@ -23,6 +23,7 @@ import {
   Repository,
   ScanProgress,
   GitHubRateLimit,
+  RateLimitError,
   fetchOrgRepos,
   checkAllReposForJfrog,
   generateCsv,
@@ -121,7 +122,7 @@ function App() {
         totalRepos: allRepos.length
       }))
 
-      const checkedRepos = await checkAllReposForJfrog(
+      const scanResult = await checkAllReposForJfrog(
         allRepos,
         getCurrentToken(),
         (checked, current, jfrogFound) => {
@@ -135,19 +136,40 @@ function App() {
         handleRateLimit
       )
 
-      setRepos(checkedRepos)
-      setProgress(prev => ({
-        ...prev,
-        phase: 'complete',
-        checkedRepos: checkedRepos.length,
-        jfrogReposFound: checkedRepos.filter(r => r.hasJfrog).length
-      }))
+      setRepos(scanResult.repos)
+      
+      if (scanResult.isPartial) {
+        setProgress(prev => ({
+          ...prev,
+          phase: 'partial',
+          checkedRepos: scanResult.repos.length,
+          jfrogReposFound: scanResult.repos.filter(r => r.hasJfrog).length,
+          rateLimitReset: scanResult.rateLimitReset || null,
+          error: `Rate limit exceeded. Only ${scanResult.repos.length} of ${allRepos.length} repositories were scanned.`
+        }))
+      } else {
+        setProgress(prev => ({
+          ...prev,
+          phase: 'complete',
+          checkedRepos: scanResult.repos.length,
+          jfrogReposFound: scanResult.repos.filter(r => r.hasJfrog).length
+        }))
+      }
     } catch (error) {
-      setProgress(prev => ({
-        ...prev,
-        phase: 'error',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }))
+      if (error instanceof RateLimitError) {
+        setProgress(prev => ({
+          ...prev,
+          phase: 'partial',
+          rateLimitReset: error.resetTime,
+          error: `Rate limit exceeded during repo fetch. Resets at ${error.resetTime.toLocaleTimeString()}`
+        }))
+      } else {
+        setProgress(prev => ({
+          ...prev,
+          phase: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }))
+      }
     }
   }
 
@@ -159,6 +181,7 @@ function App() {
 
   const jfrogRepos = repos.filter(r => r.hasJfrog)
   const isScanning = progress.phase === 'fetching-repos' || progress.phase === 'checking-lfs'
+  const isFinished = progress.phase === 'complete' || progress.phase === 'partial'
   const scanProgress = progress.totalRepos > 0 
     ? Math.round((progress.checkedRepos / progress.totalRepos) * 100)
     : 0
@@ -287,6 +310,8 @@ function App() {
                   <div className="flex items-center gap-2">
                     {progress.phase === 'error' ? (
                       <Warning size={18} className="text-destructive" />
+                    ) : progress.phase === 'partial' ? (
+                      <Warning size={18} className="text-yellow-500" />
                     ) : progress.phase === 'complete' ? (
                       <CheckCircle size={18} className="text-accent" />
                     ) : (
@@ -296,6 +321,7 @@ function App() {
                       {progress.phase === 'fetching-repos' && 'Fetching repositories...'}
                       {progress.phase === 'checking-lfs' && `Checking for JFrog config: ${progress.currentRepo}`}
                       {progress.phase === 'complete' && 'Scan complete'}
+                      {progress.phase === 'partial' && 'Scan stopped - Rate limit reached'}
                       {progress.phase === 'error' && 'Error'}
                     </span>
                   </div>
@@ -330,12 +356,29 @@ function App() {
                   </Alert>
                 )}
 
-                {progress.phase === 'complete' && (
+                {progress.phase === 'partial' && (
+                  <Alert className="border-yellow-500/50 bg-yellow-500/10">
+                    <Warning size={16} className="text-yellow-500" />
+                    <AlertDescription className="text-yellow-200">
+                      {progress.error}
+                      {progress.rateLimitReset && (
+                        <span className="block mt-1 text-xs text-muted-foreground">
+                          Rate limit resets at {progress.rateLimitReset.toLocaleTimeString()}
+                        </span>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                {isFinished && (
                   <div className="flex items-center justify-between">
                     <div className="flex gap-4 text-sm">
                       <span>
-                        <span className="text-muted-foreground">Total repos:</span>{' '}
-                        <span className="font-semibold">{progress.totalRepos}</span>
+                        <span className="text-muted-foreground">Repos scanned:</span>{' '}
+                        <span className="font-semibold">{progress.checkedRepos}</span>
+                        {progress.phase === 'partial' && (
+                          <span className="text-muted-foreground"> of {progress.totalRepos}</span>
+                        )}
                       </span>
                       <span>
                         <span className="text-muted-foreground">JFrog repos:</span>{' '}
@@ -345,7 +388,7 @@ function App() {
                     {jfrogRepos.length > 0 && (
                       <Button variant="secondary" size="sm" onClick={handleExport}>
                         <Download size={16} className="mr-2" />
-                        Export CSV
+                        Export {progress.phase === 'partial' ? 'Partial ' : ''}CSV
                       </Button>
                     )}
                   </div>
@@ -355,12 +398,17 @@ function App() {
           </Card>
         )}
 
-        {progress.phase === 'complete' && jfrogRepos.length > 0 && (
+        {isFinished && jfrogRepos.length > 0 && (
           <Card className="bg-card border-border">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <CheckCircle size={18} className="text-accent" />
                 Repositories with JFrog LFS Config ({jfrogRepos.length})
+                {progress.phase === 'partial' && (
+                  <Badge variant="outline" className="ml-2 text-yellow-500 border-yellow-500/50">
+                    Partial Results
+                  </Badge>
+                )}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -421,13 +469,18 @@ function App() {
           </Card>
         )}
 
-        {progress.phase === 'complete' && jfrogRepos.length === 0 && (
+        {isFinished && jfrogRepos.length === 0 && (
           <Card className="bg-card border-border">
             <CardContent className="py-12 text-center">
               <Database size={32} className="mx-auto mb-4 text-muted-foreground" />
               <h3 className="text-lg font-medium mb-2">No JFrog LFS repositories found</h3>
               <p className="text-sm text-muted-foreground max-w-md mx-auto">
-                Scanned {progress.totalRepos} repositories in <span className="font-mono">{orgName}</span> but none had .lfsconfig files containing JFrog.
+                Scanned {progress.checkedRepos} repositories in <span className="font-mono">{orgName}</span> but none had .lfsconfig files containing JFrog.
+                {progress.phase === 'partial' && (
+                  <span className="block mt-2 text-yellow-500">
+                    Note: Only {progress.checkedRepos} of {progress.totalRepos} repositories were scanned due to rate limiting.
+                  </span>
+                )}
               </p>
             </CardContent>
           </Card>
