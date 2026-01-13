@@ -66,6 +66,10 @@ function App() {
     }
   }, [])
 
+  const getTokenCount = useCallback(() => {
+    return tokensRef.current.length
+  }, [])
+
   const handleAddToken = () => {
     if (newToken.trim() && !tokens.includes(newToken.trim())) {
       setTokens(current => [...current, newToken.trim()])
@@ -84,11 +88,7 @@ function App() {
       rateLimitRemaining: limit.remaining,
       rateLimitReset: limit.reset
     }))
-
-    if (limit.remaining < 50 && tokensRef.current.length > 1) {
-      rotateToken()
-    }
-  }, [rotateToken])
+  }, [])
 
   const handleScan = async () => {
     if (!orgName.trim()) return
@@ -118,7 +118,9 @@ function App() {
             currentRepo: `Page ${page}`
           }))
         },
-        handleRateLimit
+        handleRateLimit,
+        rotateToken,
+        getTokenCount
       )
 
       setProgress(prev => ({
@@ -138,7 +140,9 @@ function App() {
             jfrogReposFound: jfrogFound
           }))
         },
-        handleRateLimit
+        handleRateLimit,
+        rotateToken,
+        getTokenCount
       )
 
       setRepos(scanResult.repos)

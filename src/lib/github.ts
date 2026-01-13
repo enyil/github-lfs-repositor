@@ -45,42 +45,92 @@ interface GitTreeItem {
   sha: string
 }
 
+interface TokenManager {
+  getToken: () => string | null
+  rotateToken: () => void
+  getTokenCount: () => number
+  getTriedTokensThisRequest: () => Set<string>
+  resetTriedTokens: () => void
+}
+
+async function fetchWithTokenRotation(
+  url: string,
+  headers: HeadersInit,
+  tokenManager: TokenManager,
+  onRateLimit: (limit: GitHubRateLimit) => void
+): Promise<Response> {
+  const triedTokens = tokenManager.getTriedTokensThisRequest()
+  
+  while (true) {
+    const token = tokenManager.getToken()
+    const requestHeaders: HeadersInit = { ...headers }
+    if (token) {
+      requestHeaders['Authorization'] = `Bearer ${token}`
+    }
+
+    const response = await fetch(url, { headers: requestHeaders })
+    
+    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
+    const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
+    const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+    onRateLimit({ remaining, limit, reset })
+
+    if (response.status === 403 && remaining === 0) {
+      if (token) {
+        triedTokens.add(token)
+      }
+      
+      const tokenCount = tokenManager.getTokenCount()
+      if (tokenCount > 1 && triedTokens.size < tokenCount) {
+        tokenManager.rotateToken()
+        continue
+      }
+      
+      throw new RateLimitError(reset)
+    }
+
+    tokenManager.resetTriedTokens()
+    return response
+  }
+}
+
 export async function fetchOrgRepos(
   org: string,
   getToken: () => string | null,
   onProgress: (repos: Repository[], page: number) => void,
-  onRateLimit: (limit: GitHubRateLimit) => void
+  onRateLimit: (limit: GitHubRateLimit) => void,
+  rotateToken?: () => void,
+  getTokenCount?: () => number
 ): Promise<Repository[]> {
   const allRepos: Repository[] = []
   let page = 1
   const perPage = 100
   let hasMore = true
 
+  const triedTokens = new Set<string>()
+  const tokenManager: TokenManager = {
+    getToken,
+    rotateToken: rotateToken || (() => {}),
+    getTokenCount: getTokenCount || (() => 1),
+    getTriedTokensThisRequest: () => triedTokens,
+    resetTriedTokens: () => triedTokens.clear()
+  }
+
   while (hasMore) {
-    const token = getToken()
     const headers: HeadersInit = {
       'Accept': 'application/vnd.github+json',
     }
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
-    }
 
-    const response = await fetch(
+    const response = await fetchWithTokenRotation(
       `https://api.github.com/orgs/${org}/repos?per_page=${perPage}&page=${page}&sort=pushed`,
-      { headers }
+      headers,
+      tokenManager,
+      onRateLimit
     )
-
-    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
-    const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
-    const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
-    onRateLimit({ remaining, limit, reset })
 
     if (!response.ok) {
       if (response.status === 404) {
         throw new Error(`Organization "${org}" not found`)
-      }
-      if (response.status === 403 && remaining === 0) {
-        throw new Error(`Rate limit exceeded. Resets at ${reset.toLocaleTimeString()}`)
       }
       throw new Error(`GitHub API error: ${response.status}`)
     }
@@ -113,52 +163,37 @@ export async function fetchOrgRepos(
         page++
       }
     }
-
-    if (remaining < 10) {
-      const waitTime = Math.max(0, reset.getTime() - Date.now())
-      if (waitTime > 0 && waitTime < 60000) {
-        await new Promise(resolve => setTimeout(resolve, waitTime + 1000))
-      }
-    }
   }
 
   return allRepos
 }
 
-function checkRateLimitResponse(response: Response): void {
-  if (response.status === 403) {
-    const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
-    if (remaining === 0) {
-      const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
-      throw new RateLimitError(reset)
-    }
-  }
-}
-
 export async function checkRepoForJfrog(
   repo: Repository,
   getToken: () => string | null,
-  onRateLimit: (limit: GitHubRateLimit) => void
+  onRateLimit: (limit: GitHubRateLimit) => void,
+  rotateToken?: () => void,
+  getTokenCount?: () => number
 ): Promise<Repository> {
-  const token = getToken()
+  const triedTokens = new Set<string>()
+  const tokenManager: TokenManager = {
+    getToken,
+    rotateToken: rotateToken || (() => {}),
+    getTokenCount: getTokenCount || (() => 1),
+    getTriedTokensThisRequest: () => triedTokens,
+    resetTriedTokens: () => triedTokens.clear()
+  }
+
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github+json',
   }
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
 
-  const treeResponse = await fetch(
+  const treeResponse = await fetchWithTokenRotation(
     `https://api.github.com/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
-    { headers }
+    headers,
+    tokenManager,
+    onRateLimit
   )
-
-  const remaining = parseInt(treeResponse.headers.get('x-ratelimit-remaining') || '0')
-  const limit = parseInt(treeResponse.headers.get('x-ratelimit-limit') || '60')
-  const reset = new Date(parseInt(treeResponse.headers.get('x-ratelimit-reset') || '0') * 1000)
-  onRateLimit({ remaining, limit, reset })
-
-  checkRateLimitResponse(treeResponse)
 
   if (!treeResponse.ok) {
     return { ...repo, hasJfrog: false, jfrogUrls: [], configLocations: [] }
@@ -177,20 +212,16 @@ export async function checkRepoForJfrog(
   const configLocations: string[] = []
 
   for (const file of lfsConfigFiles) {
-    const currentToken = getToken()
     const contentHeaders: HeadersInit = {
       'Accept': 'application/vnd.github.raw',
     }
-    if (currentToken) {
-      contentHeaders['Authorization'] = `Bearer ${currentToken}`
-    }
 
-    const contentResponse = await fetch(
+    const contentResponse = await fetchWithTokenRotation(
       `https://api.github.com/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
-      { headers: contentHeaders }
+      contentHeaders,
+      tokenManager,
+      onRateLimit
     )
-
-    checkRateLimitResponse(contentResponse)
 
     if (!contentResponse.ok) continue
 
@@ -227,7 +258,9 @@ export async function checkAllReposForJfrog(
   repos: Repository[],
   getToken: () => string | null,
   onProgress: (checked: number, current: string, jfrogFound: number) => void,
-  onRateLimit: (limit: GitHubRateLimit) => void
+  onRateLimit: (limit: GitHubRateLimit) => void,
+  rotateToken?: () => void,
+  getTokenCount?: () => number
 ): Promise<ScanResult> {
   const results: Repository[] = []
   let jfrogCount = 0
@@ -239,7 +272,7 @@ export async function checkAllReposForJfrog(
     
     try {
       const batchResults = await Promise.all(
-        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit))
+        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit, rotateToken, getTokenCount))
       )
       
       for (const result of batchResults) {
