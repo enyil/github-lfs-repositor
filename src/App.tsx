@@ -293,16 +293,26 @@ function App() {
                             }`}
                           >
                             {aggregateLimit.totalRemaining.toLocaleString()} / {aggregateLimit.totalLimit.toLocaleString()} requests
+                            {aggregateLimit.uniqueUsers < tokens.length && (
+                              <span className="ml-1 text-muted-foreground">({aggregateLimit.uniqueUsers} user{aggregateLimit.uniqueUsers !== 1 ? 's' : ''})</span>
+                            )}
                           </Badge>
                         </TooltipTrigger>
                         <TooltipContent className="max-w-xs">
                           <p className="font-medium mb-2">Rate limits per token:</p>
                           {aggregateLimit.tokenLimits.map((tl, i) => (
                             <div key={i} className="flex justify-between gap-4 text-xs">
-                              <span className="font-mono">{tl.token.slice(0, 8)}...</span>
+                              <span className="font-mono">
+                                {tl.username ? `@${tl.username}` : tl.token.slice(0, 8) + '...'}
+                              </span>
                               <span>{tl.remaining} / {tl.limit}</span>
                             </div>
                           ))}
+                          {aggregateLimit.uniqueUsers < tokens.length && (
+                            <p className="text-muted-foreground text-xs mt-2 pt-2 border-t border-border">
+                              Some tokens share the same user - limits counted once per user.
+                            </p>
+                          )}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
@@ -355,12 +365,22 @@ function App() {
                   </div>
                   {tokens.map((token, i) => {
                     const tokenLimit = aggregateLimit?.tokenLimits.find(tl => tl.token === token)
+                    const isDuplicateUser = tokenLimit?.userId && aggregateLimit?.tokenLimits.some(
+                      (tl, idx) => idx !== i && tl.userId === tokenLimit.userId
+                    )
                     return (
                       <div key={i} className="flex items-center justify-between bg-secondary/50 rounded px-3 py-1.5 text-xs">
                         <span className="font-mono text-muted-foreground flex items-center gap-2">
-                          {token.slice(0, 8)}...{token.slice(-4)}
+                          {tokenLimit?.username ? (
+                            <span>@{tokenLimit.username}</span>
+                          ) : (
+                            <span>{token.slice(0, 8)}...{token.slice(-4)}</span>
+                          )}
                           {i === currentTokenIndex % tokens.length && isScanning && (
                             <Badge variant="outline" className="text-[10px]">active</Badge>
+                          )}
+                          {isDuplicateUser && (
+                            <Badge variant="outline" className="text-[10px] text-yellow-500 border-yellow-500/50">shared</Badge>
                           )}
                           {tokenLimit && (
                             <span className={`${

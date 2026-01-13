@@ -336,12 +336,15 @@ export interface TokenRateLimit {
   remaining: number
   limit: number
   reset: Date
+  userId?: number
+  username?: string
 }
 
 export interface AggregateRateLimit {
   totalRemaining: number
   totalLimit: number
   tokenLimits: TokenRateLimit[]
+  uniqueUsers: number
 }
 
 export async function fetchTokenRateLimits(tokens: string[]): Promise<AggregateRateLimit> {
@@ -349,35 +352,69 @@ export async function fetchTokenRateLimits(tokens: string[]): Promise<AggregateR
   
   for (const token of tokens) {
     try {
-      const response = await fetch('https://api.github.com/rate_limit', {
-        headers: {
-          'Accept': 'application/vnd.github+json',
-          'Authorization': `Bearer ${token}`
-        }
-      })
+      const [rateLimitResponse, userResponse] = await Promise.all([
+        fetch('https://api.github.com/rate_limit', {
+          headers: {
+            'Accept': 'application/vnd.github+json',
+            'Authorization': `Bearer ${token}`
+          }
+        }),
+        fetch('https://api.github.com/user', {
+          headers: {
+            'Accept': 'application/vnd.github+json',
+            'Authorization': `Bearer ${token}`
+          }
+        })
+      ])
       
-      if (response.ok) {
-        const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
-        const limit = parseInt(response.headers.get('x-ratelimit-limit') || '5000')
-        const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+      if (rateLimitResponse.ok) {
+        const remaining = parseInt(rateLimitResponse.headers.get('x-ratelimit-remaining') || '0')
+        const limit = parseInt(rateLimitResponse.headers.get('x-ratelimit-limit') || '5000')
+        const reset = new Date(parseInt(rateLimitResponse.headers.get('x-ratelimit-reset') || '0') * 1000)
+        
+        let userId: number | undefined
+        let username: string | undefined
+        
+        if (userResponse.ok) {
+          const userData = await userResponse.json()
+          userId = userData.id
+          username = userData.login
+        }
         
         tokenLimits.push({
           token,
           remaining,
           limit,
-          reset
+          reset,
+          userId,
+          username
         })
       }
     } catch {
     }
   }
   
-  const totalRemaining = tokenLimits.reduce((sum, t) => sum + t.remaining, 0)
-  const totalLimit = tokenLimits.reduce((sum, t) => sum + t.limit, 0)
+  const seenUserIds = new Set<number>()
+  let totalRemaining = 0
+  let totalLimit = 0
+  
+  for (const tokenLimit of tokenLimits) {
+    if (tokenLimit.userId !== undefined) {
+      if (!seenUserIds.has(tokenLimit.userId)) {
+        seenUserIds.add(tokenLimit.userId)
+        totalRemaining += tokenLimit.remaining
+        totalLimit += tokenLimit.limit
+      }
+    } else {
+      totalRemaining += tokenLimit.remaining
+      totalLimit += tokenLimit.limit
+    }
+  }
   
   return {
     totalRemaining,
     totalLimit,
-    tokenLimits
+    tokenLimits,
+    uniqueUsers: seenUserIds.size
   }
 }
