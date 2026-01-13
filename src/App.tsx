@@ -1,10 +1,11 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { 
   MagnifyingGlass, 
   Download, 
@@ -17,17 +18,20 @@ import {
   X,
   Database,
   Clock,
-  ArrowRight
+  ArrowRight,
+  ArrowsClockwise
 } from '@phosphor-icons/react'
 import {
   Repository,
   ScanProgress,
   GitHubRateLimit,
   RateLimitError,
+  AggregateRateLimit,
   fetchOrgRepos,
   checkAllReposForJfrog,
   generateCsv,
-  downloadCsv
+  downloadCsv,
+  fetchTokenRateLimits
 } from '@/lib/github'
 
 function App() {
@@ -36,6 +40,8 @@ function App() {
   const [newToken, setNewToken] = useState('')
   const [showTokens, setShowTokens] = useState(false)
   const [repos, setRepos] = useState<Repository[]>([])
+  const [aggregateLimit, setAggregateLimit] = useState<AggregateRateLimit | null>(null)
+  const [loadingLimits, setLoadingLimits] = useState(false)
   const [progress, setProgress] = useState<ScanProgress>({
     phase: 'idle',
     totalRepos: 0,
@@ -53,6 +59,24 @@ function App() {
   const tokensRef = useRef<string[]>([])
 
   tokensRef.current = tokens
+
+  const refreshRateLimits = useCallback(async () => {
+    if (tokens.length === 0) {
+      setAggregateLimit(null)
+      return
+    }
+    setLoadingLimits(true)
+    try {
+      const limits = await fetchTokenRateLimits(tokens)
+      setAggregateLimit(limits)
+    } finally {
+      setLoadingLimits(false)
+    }
+  }, [tokens])
+
+  useEffect(() => {
+    refreshRateLimits()
+  }, [tokens.length])
 
   const getCurrentToken = useCallback(() => {
     if (tokensRef.current.length === 0) return null
@@ -255,9 +279,38 @@ function App() {
                   <Database size={18} />
                   PAT Tokens (Optional)
                 </span>
-                <Badge variant="secondary" className="font-mono text-xs">
-                  {tokens.length} token{tokens.length !== 1 ? 's' : ''}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  {aggregateLimit && tokens.length > 0 && (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge 
+                            variant="outline" 
+                            className={`font-mono text-xs cursor-help ${
+                              aggregateLimit.totalRemaining < 100 ? 'text-destructive border-destructive/50' :
+                              aggregateLimit.totalRemaining < 500 ? 'text-yellow-500 border-yellow-500/50' :
+                              'text-accent border-accent/50'
+                            }`}
+                          >
+                            {aggregateLimit.totalRemaining.toLocaleString()} / {aggregateLimit.totalLimit.toLocaleString()} requests
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          <p className="font-medium mb-2">Rate limits per token:</p>
+                          {aggregateLimit.tokenLimits.map((tl, i) => (
+                            <div key={i} className="flex justify-between gap-4 text-xs">
+                              <span className="font-mono">{tl.token.slice(0, 8)}...</span>
+                              <span>{tl.remaining} / {tl.limit}</span>
+                            </div>
+                          ))}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  )}
+                  <Badge variant="secondary" className="font-mono text-xs">
+                    {tokens.length} token{tokens.length !== 1 ? 's' : ''}
+                  </Badge>
+                </div>
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -289,22 +342,45 @@ function App() {
               </div>
               {tokens.length > 0 && (
                 <div className="space-y-1">
-                  {tokens.map((token, i) => (
-                    <div key={i} className="flex items-center justify-between bg-secondary/50 rounded px-3 py-1.5 text-xs">
-                      <span className="font-mono text-muted-foreground">
-                        {token.slice(0, 8)}...{token.slice(-4)}
-                        {i === currentTokenIndex % tokens.length && isScanning && (
-                          <Badge variant="outline" className="ml-2 text-[10px]">active</Badge>
-                        )}
-                      </span>
-                      <button
-                        onClick={() => handleRemoveToken(i)}
-                        className="text-muted-foreground hover:text-destructive"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ))}
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-muted-foreground">Added tokens:</span>
+                    <button
+                      onClick={refreshRateLimits}
+                      disabled={loadingLimits}
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <ArrowsClockwise size={12} className={loadingLimits ? 'animate-spin' : ''} />
+                      Refresh limits
+                    </button>
+                  </div>
+                  {tokens.map((token, i) => {
+                    const tokenLimit = aggregateLimit?.tokenLimits.find(tl => tl.token === token)
+                    return (
+                      <div key={i} className="flex items-center justify-between bg-secondary/50 rounded px-3 py-1.5 text-xs">
+                        <span className="font-mono text-muted-foreground flex items-center gap-2">
+                          {token.slice(0, 8)}...{token.slice(-4)}
+                          {i === currentTokenIndex % tokens.length && isScanning && (
+                            <Badge variant="outline" className="text-[10px]">active</Badge>
+                          )}
+                          {tokenLimit && (
+                            <span className={`${
+                              tokenLimit.remaining < 100 ? 'text-destructive' :
+                              tokenLimit.remaining < 500 ? 'text-yellow-500' :
+                              'text-accent'
+                            }`}>
+                              ({tokenLimit.remaining})
+                            </span>
+                          )}
+                        </span>
+                        <button
+                          onClick={() => handleRemoveToken(i)}
+                          className="text-muted-foreground hover:text-destructive"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </CardContent>

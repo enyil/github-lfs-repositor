@@ -330,3 +330,54 @@ export function downloadCsv(content: string, filename: string): void {
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
 }
+
+export interface TokenRateLimit {
+  token: string
+  remaining: number
+  limit: number
+  reset: Date
+}
+
+export interface AggregateRateLimit {
+  totalRemaining: number
+  totalLimit: number
+  tokenLimits: TokenRateLimit[]
+}
+
+export async function fetchTokenRateLimits(tokens: string[]): Promise<AggregateRateLimit> {
+  const tokenLimits: TokenRateLimit[] = []
+  
+  for (const token of tokens) {
+    try {
+      const response = await fetch('https://api.github.com/rate_limit', {
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (response.ok) {
+        const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
+        const limit = parseInt(response.headers.get('x-ratelimit-limit') || '5000')
+        const reset = new Date(parseInt(response.headers.get('x-ratelimit-reset') || '0') * 1000)
+        
+        tokenLimits.push({
+          token,
+          remaining,
+          limit,
+          reset
+        })
+      }
+    } catch {
+    }
+  }
+  
+  const totalRemaining = tokenLimits.reduce((sum, t) => sum + t.remaining, 0)
+  const totalLimit = tokenLimits.reduce((sum, t) => sum + t.limit, 0)
+  
+  return {
+    totalRemaining,
+    totalLimit,
+    tokenLimits
+  }
+}
