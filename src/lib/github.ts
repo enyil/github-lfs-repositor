@@ -75,44 +75,72 @@ export interface ScanState {
   isComplete: boolean
 }
 
-const MAX_RETRIES = 3
-const RETRY_DELAYS = [1000, 3000, 5000]
+const MAX_RETRIES = 5
+const RETRY_DELAYS = [1000, 2000, 4000, 8000, 15000]
 
 async function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+export class ServerError extends Error {
+  statusCode: number
+  constructor(statusCode: number) {
+    super(`Server error: ${statusCode}`)
+    this.name = 'ServerError'
+    this.statusCode = statusCode
+  }
+}
+
 async function fetchWithRetry(
   url: string,
   headers: HeadersInit,
-  retries = MAX_RETRIES
+  retries = MAX_RETRIES,
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void
 ): Promise<Response> {
   let lastError: Error | null = null
   
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const response = await fetch(url, { headers })
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 30000)
+      
+      const response = await fetch(url, { 
+        headers,
+        signal: controller.signal
+      })
+      
+      clearTimeout(timeoutId)
       
       if (response.status >= 500) {
-        lastError = new NetworkError(`Server error: ${response.status}`, response.status)
+        const errorMsg = `Server error ${response.status}`
+        lastError = new ServerError(response.status)
         if (attempt < retries - 1) {
-          await sleep(RETRY_DELAYS[attempt] || 5000)
+          const delay = RETRY_DELAYS[attempt] || 15000
+          onRetry?.(attempt + 1, retries, `${errorMsg}, retrying in ${delay / 1000}s...`)
+          await sleep(delay)
           continue
         }
       }
       
       return response
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error))
+      if (error instanceof Error && error.name === 'AbortError') {
+        lastError = new NetworkError('Request timeout', undefined, true)
+      } else {
+        lastError = error instanceof Error ? error : new Error(String(error))
+      }
+      
       if (attempt < retries - 1) {
-        await sleep(RETRY_DELAYS[attempt] || 5000)
+        const delay = RETRY_DELAYS[attempt] || 15000
+        onRetry?.(attempt + 1, retries, `${lastError.message}, retrying in ${delay / 1000}s...`)
+        await sleep(delay)
       }
     }
   }
   
   throw new NetworkError(
     `Request failed after ${retries} attempts: ${lastError?.message || 'Unknown error'}`,
-    undefined,
+    lastError instanceof ServerError ? lastError.statusCode : undefined,
     true
   )
 }
@@ -121,7 +149,8 @@ async function fetchWithTokenRotation(
   url: string,
   headers: HeadersInit,
   tokenManager: TokenManager,
-  onRateLimit: (limit: GitHubRateLimit) => void
+  onRateLimit: (limit: GitHubRateLimit) => void,
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void
 ): Promise<Response> {
   const triedTokens = tokenManager.getTriedTokensThisRequest()
   
@@ -132,7 +161,7 @@ async function fetchWithTokenRotation(
       requestHeaders['Authorization'] = `Bearer ${token}`
     }
 
-    const response = await fetchWithRetry(url, requestHeaders)
+    const response = await fetchWithRetry(url, requestHeaders, MAX_RETRIES, onRetry)
     
     const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
     const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
@@ -165,7 +194,8 @@ export async function fetchOrgRepos(
   onRateLimit: (limit: GitHubRateLimit) => void,
   rotateToken?: () => void,
   getTokenCount?: () => number,
-  existingRepos?: Repository[]
+  existingRepos?: Repository[],
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void
 ): Promise<Repository[]> {
   if (existingRepos && existingRepos.length > 0) {
     onProgress(existingRepos, 0)
@@ -195,7 +225,8 @@ export async function fetchOrgRepos(
       `https://api.github.com/orgs/${org}/repos?per_page=${perPage}&page=${page}&sort=pushed`,
       headers,
       tokenManager,
-      onRateLimit
+      onRateLimit,
+      onRetry
     )
 
     if (!response.ok) {
@@ -243,7 +274,8 @@ export async function checkRepoForJfrog(
   getToken: () => string | null,
   onRateLimit: (limit: GitHubRateLimit) => void,
   rotateToken?: () => void,
-  getTokenCount?: () => number
+  getTokenCount?: () => number,
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void
 ): Promise<Repository> {
   const triedTokens = new Set<string>()
   const tokenManager: TokenManager = {
@@ -262,7 +294,8 @@ export async function checkRepoForJfrog(
     `https://api.github.com/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
     headers,
     tokenManager,
-    onRateLimit
+    onRateLimit,
+    onRetry
   )
 
   if (!treeResponse.ok) {
@@ -290,7 +323,8 @@ export async function checkRepoForJfrog(
       `https://api.github.com/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
       contentHeaders,
       tokenManager,
-      onRateLimit
+      onRateLimit,
+      onRetry
     )
 
     if (!contentResponse.ok) continue
@@ -333,7 +367,8 @@ export async function checkAllReposForJfrog(
   onRateLimit: (limit: GitHubRateLimit) => void,
   rotateToken?: () => void,
   getTokenCount?: () => number,
-  existingScanState?: ScanState
+  existingScanState?: ScanState,
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void
 ): Promise<ScanResult> {
   const orgName = repos[0]?.full_name.split('/')[0] || 'unknown'
   
@@ -360,7 +395,7 @@ export async function checkAllReposForJfrog(
     
     try {
       const batchResults = await Promise.all(
-        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit, rotateToken, getTokenCount))
+        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit, rotateToken, getTokenCount, onRetry))
       )
       
       for (const result of batchResults) {
@@ -389,7 +424,7 @@ export async function checkAllReposForJfrog(
         }
       }
       
-      if (error instanceof NetworkError) {
+      if (error instanceof NetworkError || error instanceof ServerError) {
         return {
           repos: results,
           isPartial: true,

@@ -29,6 +29,7 @@ import {
   ScanProgress,
   GitHubRateLimit,
   RateLimitError,
+  NetworkError,
   AggregateRateLimit,
   ScanState,
   fetchOrgRepos,
@@ -60,6 +61,7 @@ function App() {
     rateLimitRemaining: 60,
     rateLimitReset: null
   })
+  const [retryMessage, setRetryMessage] = useState<string | null>(null)
   const [rateLimit, setRateLimit] = useState<GitHubRateLimit | null>(null)
   const [currentTokenIndex, setCurrentTokenIndex] = useState(0)
   const tokenIndexRef = useRef(0)
@@ -122,6 +124,10 @@ function App() {
     }))
   }, [])
 
+  const handleRetry = useCallback((attempt: number, maxRetries: number, error: string) => {
+    setRetryMessage(`Retry ${attempt}/${maxRetries}: ${error}`)
+  }, [])
+
   const handleScan = async (resumeState?: ScanState) => {
     const targetOrg = resumeState?.orgName || orgName.trim()
     if (!targetOrg) return
@@ -131,6 +137,7 @@ function App() {
     }
 
     setRepos(resumeState?.jfrogRepos || [])
+    setRetryMessage(null)
     setProgress({
       phase: resumeState ? 'checking-lfs' : 'fetching-repos',
       totalRepos: resumeState?.allRepos.length || 0,
@@ -142,6 +149,8 @@ function App() {
       rateLimitRemaining: rateLimit?.remaining || 60,
       rateLimitReset: rateLimit?.reset || null
     })
+
+    let currentScanState: ScanState | null = resumeState || null
 
     try {
       const allRepos = resumeState?.allRepos || await fetchOrgRepos(
@@ -157,9 +166,24 @@ function App() {
         },
         handleRateLimit,
         rotateToken,
-        getTokenCount
+        getTokenCount,
+        undefined,
+        handleRetry
       )
 
+      if (!currentScanState) {
+        currentScanState = {
+          orgName: targetOrg,
+          createdAt: new Date().toISOString(),
+          allRepos,
+          scannedRepoIds: [],
+          pendingRepoIds: allRepos.map(r => r.id),
+          jfrogRepos: [],
+          isComplete: false
+        }
+      }
+
+      setRetryMessage(null)
       setProgress(prev => ({
         ...prev,
         phase: 'checking-lfs',
@@ -170,6 +194,7 @@ function App() {
         allRepos,
         getCurrentToken,
         (checked, current, jfrogFound) => {
+          setRetryMessage(null)
           setProgress(prev => ({
             ...prev,
             checkedRepos: checked,
@@ -180,20 +205,24 @@ function App() {
         handleRateLimit,
         rotateToken,
         getTokenCount,
-        resumeState
+        currentScanState,
+        handleRetry
       )
 
       setRepos(scanResult.repos)
       setScanState(scanResult.scanState)
+      setRetryMessage(null)
       
       if (scanResult.isPartial) {
+        downloadScanState(scanResult.scanState)
+        
         setProgress(prev => ({
           ...prev,
           phase: 'partial',
           checkedRepos: scanResult.scanState.scannedRepoIds.length,
           jfrogReposFound: scanResult.repos.filter(r => r.hasJfrog).length,
           rateLimitReset: scanResult.rateLimitReset || null,
-          error: scanResult.errorMessage || `Scan interrupted. ${scanResult.scanState.scannedRepoIds.length} of ${allRepos.length} repositories scanned.`
+          error: scanResult.errorMessage || `Scan interrupted. ${scanResult.scanState.scannedRepoIds.length} of ${allRepos.length} repositories scanned. State file auto-downloaded for recovery.`
         }))
       } else {
         setProgress(prev => ({
@@ -204,18 +233,32 @@ function App() {
         }))
       }
     } catch (error) {
+      setRetryMessage(null)
+      
+      if (currentScanState) {
+        currentScanState.lastError = error instanceof Error ? error.message : 'Unknown error'
+        setScanState(currentScanState)
+        downloadScanState(currentScanState)
+      }
+      
       if (error instanceof RateLimitError) {
         setProgress(prev => ({
           ...prev,
           phase: 'partial',
           rateLimitReset: error.resetTime,
-          error: `Rate limit exceeded during repo fetch. Resets at ${error.resetTime.toLocaleTimeString()}`
+          error: `Rate limit exceeded during repo fetch. Resets at ${error.resetTime.toLocaleTimeString()}. State file auto-downloaded.`
+        }))
+      } else if (error instanceof NetworkError) {
+        setProgress(prev => ({
+          ...prev,
+          phase: 'partial',
+          error: `Network error: ${error.message}. State file auto-downloaded for recovery.`
         }))
       } else {
         setProgress(prev => ({
           ...prev,
           phase: 'error',
-          error: error instanceof Error ? error.message : 'Unknown error'
+          error: (error instanceof Error ? error.message : 'Unknown error') + (currentScanState ? ' State file auto-downloaded for recovery.' : '')
         }))
       }
     }
@@ -550,13 +593,21 @@ function App() {
                 </div>
                 
                 {(progress.phase === 'fetching-repos' || progress.phase === 'checking-lfs') && (
-                  <div className="relative overflow-hidden rounded-full bg-secondary h-2">
-                    <div 
-                      className="h-full bg-primary transition-all duration-300 ease-out"
-                      style={{ width: `${progress.phase === 'fetching-repos' ? 5 : scanProgress}%` }}
-                    />
-                    {progress.phase === 'fetching-repos' && (
-                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-primary/30 to-transparent animate-scan" />
+                  <div className="space-y-2">
+                    <div className="relative overflow-hidden rounded-full bg-secondary h-2">
+                      <div 
+                        className="h-full bg-primary transition-all duration-300 ease-out"
+                        style={{ width: `${progress.phase === 'fetching-repos' ? 5 : scanProgress}%` }}
+                      />
+                      {progress.phase === 'fetching-repos' && (
+                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-primary/30 to-transparent animate-scan" />
+                      )}
+                    </div>
+                    {retryMessage && (
+                      <div className="flex items-center gap-2 text-xs text-yellow-500">
+                        <ArrowsClockwise size={12} className="animate-spin" />
+                        <span>{retryMessage}</span>
+                      </div>
                     )}
                   </div>
                 )}
@@ -577,6 +628,9 @@ function App() {
                           Rate limit resets at {progress.rateLimitReset.toLocaleTimeString()}
                         </span>
                       )}
+                      <span className="block mt-1 text-xs text-muted-foreground">
+                        Scan state has been auto-saved. Use "Load State" to resume later.
+                      </span>
                     </AlertDescription>
                   </Alert>
                 )}
