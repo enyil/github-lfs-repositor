@@ -39,6 +39,17 @@ export class RateLimitError extends Error {
   }
 }
 
+export class NetworkError extends Error {
+  statusCode?: number
+  retryable: boolean
+  constructor(message: string, statusCode?: number, retryable = true) {
+    super(message)
+    this.name = 'NetworkError'
+    this.statusCode = statusCode
+    this.retryable = retryable
+  }
+}
+
 interface GitTreeItem {
   path: string
   type: string
@@ -51,6 +62,59 @@ interface TokenManager {
   getTokenCount: () => number
   getTriedTokensThisRequest: () => Set<string>
   resetTriedTokens: () => void
+}
+
+export interface ScanState {
+  orgName: string
+  createdAt: string
+  allRepos: Repository[]
+  scannedRepoIds: number[]
+  pendingRepoIds: number[]
+  jfrogRepos: Repository[]
+  lastError?: string
+  isComplete: boolean
+}
+
+const MAX_RETRIES = 3
+const RETRY_DELAYS = [1000, 3000, 5000]
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function fetchWithRetry(
+  url: string,
+  headers: HeadersInit,
+  retries = MAX_RETRIES
+): Promise<Response> {
+  let lastError: Error | null = null
+  
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const response = await fetch(url, { headers })
+      
+      if (response.status >= 500) {
+        lastError = new NetworkError(`Server error: ${response.status}`, response.status)
+        if (attempt < retries - 1) {
+          await sleep(RETRY_DELAYS[attempt] || 5000)
+          continue
+        }
+      }
+      
+      return response
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (attempt < retries - 1) {
+        await sleep(RETRY_DELAYS[attempt] || 5000)
+      }
+    }
+  }
+  
+  throw new NetworkError(
+    `Request failed after ${retries} attempts: ${lastError?.message || 'Unknown error'}`,
+    undefined,
+    true
+  )
 }
 
 async function fetchWithTokenRotation(
@@ -68,7 +132,7 @@ async function fetchWithTokenRotation(
       requestHeaders['Authorization'] = `Bearer ${token}`
     }
 
-    const response = await fetch(url, { headers: requestHeaders })
+    const response = await fetchWithRetry(url, requestHeaders)
     
     const remaining = parseInt(response.headers.get('x-ratelimit-remaining') || '0')
     const limit = parseInt(response.headers.get('x-ratelimit-limit') || '60')
@@ -100,8 +164,14 @@ export async function fetchOrgRepos(
   onProgress: (repos: Repository[], page: number) => void,
   onRateLimit: (limit: GitHubRateLimit) => void,
   rotateToken?: () => void,
-  getTokenCount?: () => number
+  getTokenCount?: () => number,
+  existingRepos?: Repository[]
 ): Promise<Repository[]> {
+  if (existingRepos && existingRepos.length > 0) {
+    onProgress(existingRepos, 0)
+    return existingRepos
+  }
+
   const allRepos: Repository[] = []
   let page = 1
   const perPage = 100
@@ -132,7 +202,7 @@ export async function fetchOrgRepos(
       if (response.status === 404) {
         throw new Error(`Organization "${org}" not found`)
       }
-      throw new Error(`GitHub API error: ${response.status}`)
+      throw new NetworkError(`GitHub API error: ${response.status}`, response.status)
     }
 
     const repos: any[] = await response.json()
@@ -252,6 +322,8 @@ export interface ScanResult {
   repos: Repository[]
   isPartial: boolean
   rateLimitReset?: Date
+  errorMessage?: string
+  scanState: ScanState
 }
 
 export async function checkAllReposForJfrog(
@@ -260,15 +332,31 @@ export async function checkAllReposForJfrog(
   onProgress: (checked: number, current: string, jfrogFound: number) => void,
   onRateLimit: (limit: GitHubRateLimit) => void,
   rotateToken?: () => void,
-  getTokenCount?: () => number
+  getTokenCount?: () => number,
+  existingScanState?: ScanState
 ): Promise<ScanResult> {
-  const results: Repository[] = []
-  let jfrogCount = 0
+  const orgName = repos[0]?.full_name.split('/')[0] || 'unknown'
+  
+  const scanState: ScanState = existingScanState || {
+    orgName,
+    createdAt: new Date().toISOString(),
+    allRepos: repos,
+    scannedRepoIds: [],
+    pendingRepoIds: repos.map(r => r.id),
+    jfrogRepos: [],
+    isComplete: false
+  }
+
+  const pendingRepos = repos.filter(r => scanState.pendingRepoIds.includes(r.id))
+  const alreadyScanned = scanState.scannedRepoIds.length
+  
+  const results: Repository[] = [...scanState.jfrogRepos]
+  let jfrogCount = results.filter(r => r.hasJfrog).length
   const token = getToken()
   const concurrency = token ? 5 : 2
 
-  for (let i = 0; i < repos.length; i += concurrency) {
-    const batch = repos.slice(i, i + concurrency)
+  for (let i = 0; i < pendingRepos.length; i += concurrency) {
+    const batch = pendingRepos.slice(i, i + concurrency)
     
     try {
       const batchResults = await Promise.all(
@@ -276,30 +364,60 @@ export async function checkAllReposForJfrog(
       )
       
       for (const result of batchResults) {
-        results.push(result)
-        if (result.hasJfrog) jfrogCount++
+        scanState.scannedRepoIds.push(result.id)
+        scanState.pendingRepoIds = scanState.pendingRepoIds.filter(id => id !== result.id)
+        
+        if (result.hasJfrog) {
+          results.push(result)
+          scanState.jfrogRepos.push(result)
+          jfrogCount++
+        }
       }
       
-      onProgress(results.length, batch[batch.length - 1]?.name || '', jfrogCount)
+      onProgress(alreadyScanned + i + batchResults.length, batch[batch.length - 1]?.name || '', jfrogCount)
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      scanState.lastError = errorMessage
+      
       if (error instanceof RateLimitError) {
         return {
           repos: results,
           isPartial: true,
-          rateLimitReset: error.resetTime
+          rateLimitReset: error.resetTime,
+          errorMessage: `Rate limit exceeded. Resets at ${error.resetTime.toLocaleTimeString()}`,
+          scanState
         }
       }
-      throw error
+      
+      if (error instanceof NetworkError) {
+        return {
+          repos: results,
+          isPartial: true,
+          errorMessage: `Network error: ${errorMessage}. ${scanState.scannedRepoIds.length} repos scanned, ${scanState.pendingRepoIds.length} remaining.`,
+          scanState
+        }
+      }
+      
+      return {
+        repos: results,
+        isPartial: true,
+        errorMessage,
+        scanState
+      }
     }
     
-    if (i + concurrency < repos.length) {
-      await new Promise(resolve => setTimeout(resolve, token ? 100 : 500))
+    if (i + concurrency < pendingRepos.length) {
+      await sleep(token ? 100 : 500)
     }
   }
 
+  scanState.isComplete = true
+  scanState.pendingRepoIds = []
+  
   return {
     repos: results,
-    isPartial: false
+    isPartial: false,
+    scanState
   }
 }
 
@@ -329,6 +447,37 @@ export function downloadCsv(content: string, filename: string): void {
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
+}
+
+export function downloadScanState(scanState: ScanState): void {
+  const content = JSON.stringify(scanState, null, 2)
+  const blob = new Blob([content], { type: 'application/json;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${scanState.orgName}-scan-state-${new Date().toISOString().split('T')[0]}.json`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+export function parseScanState(content: string): ScanState | null {
+  try {
+    const state = JSON.parse(content) as ScanState
+    if (
+      typeof state.orgName === 'string' &&
+      Array.isArray(state.allRepos) &&
+      Array.isArray(state.scannedRepoIds) &&
+      Array.isArray(state.pendingRepoIds) &&
+      Array.isArray(state.jfrogRepos)
+    ) {
+      return state
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 export interface TokenRateLimit {

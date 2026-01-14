@@ -19,7 +19,10 @@ import {
   Database,
   Clock,
   ArrowRight,
-  ArrowsClockwise
+  ArrowsClockwise,
+  UploadSimple,
+  FloppyDisk,
+  ArrowCounterClockwise
 } from '@phosphor-icons/react'
 import {
   Repository,
@@ -27,10 +30,13 @@ import {
   GitHubRateLimit,
   RateLimitError,
   AggregateRateLimit,
+  ScanState,
   fetchOrgRepos,
   checkAllReposForJfrog,
   generateCsv,
   downloadCsv,
+  downloadScanState,
+  parseScanState,
   fetchTokenRateLimits
 } from '@/lib/github'
 
@@ -42,6 +48,7 @@ function App() {
   const [repos, setRepos] = useState<Repository[]>([])
   const [aggregateLimit, setAggregateLimit] = useState<AggregateRateLimit | null>(null)
   const [loadingLimits, setLoadingLimits] = useState(false)
+  const [scanState, setScanState] = useState<ScanState | null>(null)
   const [progress, setProgress] = useState<ScanProgress>({
     phase: 'idle',
     totalRepos: 0,
@@ -57,6 +64,7 @@ function App() {
   const [currentTokenIndex, setCurrentTokenIndex] = useState(0)
   const tokenIndexRef = useRef(0)
   const tokensRef = useRef<string[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   tokensRef.current = tokens
 
@@ -114,25 +122,30 @@ function App() {
     }))
   }, [])
 
-  const handleScan = async () => {
-    if (!orgName.trim()) return
+  const handleScan = async (resumeState?: ScanState) => {
+    const targetOrg = resumeState?.orgName || orgName.trim()
+    if (!targetOrg) return
 
-    setRepos([])
+    if (resumeState) {
+      setOrgName(resumeState.orgName)
+    }
+
+    setRepos(resumeState?.jfrogRepos || [])
     setProgress({
-      phase: 'fetching-repos',
-      totalRepos: 0,
-      fetchedRepos: 0,
-      checkedRepos: 0,
-      jfrogReposFound: 0,
-      currentRepo: '',
+      phase: resumeState ? 'checking-lfs' : 'fetching-repos',
+      totalRepos: resumeState?.allRepos.length || 0,
+      fetchedRepos: resumeState?.allRepos.length || 0,
+      checkedRepos: resumeState?.scannedRepoIds.length || 0,
+      jfrogReposFound: resumeState?.jfrogRepos.length || 0,
+      currentRepo: resumeState ? 'Resuming scan...' : '',
       error: null,
       rateLimitRemaining: rateLimit?.remaining || 60,
       rateLimitReset: rateLimit?.reset || null
     })
 
     try {
-      const allRepos = await fetchOrgRepos(
-        orgName.trim(),
+      const allRepos = resumeState?.allRepos || await fetchOrgRepos(
+        targetOrg,
         getCurrentToken,
         (fetchedRepos, page) => {
           setProgress(prev => ({
@@ -166,25 +179,27 @@ function App() {
         },
         handleRateLimit,
         rotateToken,
-        getTokenCount
+        getTokenCount,
+        resumeState
       )
 
       setRepos(scanResult.repos)
+      setScanState(scanResult.scanState)
       
       if (scanResult.isPartial) {
         setProgress(prev => ({
           ...prev,
           phase: 'partial',
-          checkedRepos: scanResult.repos.length,
+          checkedRepos: scanResult.scanState.scannedRepoIds.length,
           jfrogReposFound: scanResult.repos.filter(r => r.hasJfrog).length,
           rateLimitReset: scanResult.rateLimitReset || null,
-          error: `Rate limit exceeded. Only ${scanResult.repos.length} of ${allRepos.length} repositories were scanned.`
+          error: scanResult.errorMessage || `Scan interrupted. ${scanResult.scanState.scannedRepoIds.length} of ${allRepos.length} repositories scanned.`
         }))
       } else {
         setProgress(prev => ({
           ...prev,
           phase: 'complete',
-          checkedRepos: scanResult.repos.length,
+          checkedRepos: scanResult.scanState.scannedRepoIds.length,
           jfrogReposFound: scanResult.repos.filter(r => r.hasJfrog).length
         }))
       }
@@ -206,15 +221,76 @@ function App() {
     }
   }
 
+  const handleResume = () => {
+    if (scanState && scanState.pendingRepoIds.length > 0) {
+      handleScan(scanState)
+    }
+  }
+
   const handleExport = () => {
     const jfrogRepos = repos.filter(r => r.hasJfrog)
     const csv = generateCsv(jfrogRepos)
-    downloadCsv(csv, `${orgName}-jfrog-repos-${new Date().toISOString().split('T')[0]}.csv`)
+    const targetOrg = scanState?.orgName || orgName
+    downloadCsv(csv, `${targetOrg}-jfrog-repos-${new Date().toISOString().split('T')[0]}.csv`)
+  }
+
+  const handleExportState = () => {
+    if (scanState) {
+      downloadScanState(scanState)
+    }
+  }
+
+  const handleImportState = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    try {
+      const content = await file.text()
+      const state = parseScanState(content)
+      
+      if (state) {
+        setScanState(state)
+        setOrgName(state.orgName)
+        setRepos(state.jfrogRepos)
+        setProgress({
+          phase: state.isComplete ? 'complete' : 'partial',
+          totalRepos: state.allRepos.length,
+          fetchedRepos: state.allRepos.length,
+          checkedRepos: state.scannedRepoIds.length,
+          jfrogReposFound: state.jfrogRepos.length,
+          currentRepo: '',
+          error: state.isComplete ? null : `Loaded state: ${state.scannedRepoIds.length} scanned, ${state.pendingRepoIds.length} remaining`,
+          rateLimitRemaining: 60,
+          rateLimitReset: null
+        })
+      } else {
+        setProgress(prev => ({
+          ...prev,
+          phase: 'error',
+          error: 'Invalid scan state file format'
+        }))
+      }
+    } catch (err) {
+      setProgress(prev => ({
+        ...prev,
+        phase: 'error',
+        error: 'Failed to read scan state file'
+      }))
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
   }
 
   const jfrogRepos = repos.filter(r => r.hasJfrog)
   const isScanning = progress.phase === 'fetching-repos' || progress.phase === 'checking-lfs'
   const isFinished = progress.phase === 'complete' || progress.phase === 'partial'
+  const canResume = scanState && scanState.pendingRepoIds.length > 0 && !isScanning
   const scanProgress = progress.totalRepos > 0 
     ? Math.round((progress.checkedRepos / progress.totalRepos) * 100)
     : 0
@@ -240,7 +316,7 @@ function App() {
                 Organization
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-3">
               <div className="flex gap-2">
                 <Input
                   id="org-name"
@@ -252,7 +328,7 @@ function App() {
                   className="bg-input border-border font-mono"
                 />
                 <Button 
-                  onClick={handleScan}
+                  onClick={() => handleScan()}
                   disabled={!orgName.trim() || isScanning}
                   className="shrink-0"
                 >
@@ -269,6 +345,36 @@ function App() {
                   )}
                 </Button>
               </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleImportState}
+                  disabled={isScanning}
+                  className="flex-1"
+                >
+                  <UploadSimple size={14} className="mr-1.5" />
+                  Load State
+                </Button>
+                {canResume && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleResume}
+                    className="flex-1"
+                  >
+                    <ArrowCounterClockwise size={14} className="mr-1.5" />
+                    Resume ({scanState.pendingRepoIds.length} left)
+                  </Button>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json"
+                className="hidden"
+                onChange={handleFileSelect}
+              />
             </CardContent>
           </Card>
 
@@ -426,7 +532,7 @@ function App() {
                       {progress.phase === 'fetching-repos' && 'Fetching repositories...'}
                       {progress.phase === 'checking-lfs' && `Checking for JFrog config: ${progress.currentRepo}`}
                       {progress.phase === 'complete' && 'Scan complete'}
-                      {progress.phase === 'partial' && 'Scan stopped - Rate limit reached'}
+                      {progress.phase === 'partial' && 'Scan stopped'}
                       {progress.phase === 'error' && 'Error'}
                     </span>
                   </div>
@@ -476,12 +582,12 @@ function App() {
                 )}
 
                 {isFinished && (
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex gap-4 text-sm">
                       <span>
                         <span className="text-muted-foreground">Repos scanned:</span>{' '}
                         <span className="font-semibold">{progress.checkedRepos}</span>
-                        {progress.phase === 'partial' && (
+                        {progress.phase === 'partial' && scanState && (
                           <span className="text-muted-foreground"> of {progress.totalRepos}</span>
                         )}
                       </span>
@@ -490,12 +596,20 @@ function App() {
                         <span className="font-semibold text-accent">{progress.jfrogReposFound}</span>
                       </span>
                     </div>
-                    {jfrogRepos.length > 0 && (
-                      <Button variant="secondary" size="sm" onClick={handleExport}>
-                        <Download size={16} className="mr-2" />
-                        Export {progress.phase === 'partial' ? 'Partial ' : ''}CSV
-                      </Button>
-                    )}
+                    <div className="flex gap-2">
+                      {scanState && (
+                        <Button variant="outline" size="sm" onClick={handleExportState}>
+                          <FloppyDisk size={16} className="mr-2" />
+                          Save State
+                        </Button>
+                      )}
+                      {jfrogRepos.length > 0 && (
+                        <Button variant="secondary" size="sm" onClick={handleExport}>
+                          <Download size={16} className="mr-2" />
+                          Export {progress.phase === 'partial' ? 'Partial ' : ''}CSV
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -583,10 +697,18 @@ function App() {
                 Scanned {progress.checkedRepos} repositories in <span className="font-mono">{orgName}</span> but none had .lfsconfig files containing JFrog.
                 {progress.phase === 'partial' && (
                   <span className="block mt-2 text-yellow-500">
-                    Note: Only {progress.checkedRepos} of {progress.totalRepos} repositories were scanned due to rate limiting.
+                    Note: Only {progress.checkedRepos} of {progress.totalRepos} repositories were scanned due to an error.
                   </span>
                 )}
               </p>
+              {scanState && progress.phase === 'partial' && (
+                <div className="mt-4 flex justify-center gap-2">
+                  <Button variant="outline" size="sm" onClick={handleExportState}>
+                    <FloppyDisk size={16} className="mr-2" />
+                    Save State for Later
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
         )}

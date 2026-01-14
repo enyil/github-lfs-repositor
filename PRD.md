@@ -1,15 +1,15 @@
-# GitHub LFS Repository Finder
+# JFrog LFS Repository Finder
 
-A tool for discovering repositories that use Git LFS within large GitHub organizations (1000+ repos), with CSV export functionality.
+A tool for discovering repositories that use JFrog LFS within large GitHub organizations (1000+ repos), with CSV export and resumable scan functionality.
 
 **Experience Qualities**:
-1. **Efficient** - Handles large organizations with thousands of repos through smart pagination and parallel requests
+1. **Resilient** - Handles errors gracefully with retry logic and resumable scans that never lose progress
 2. **Transparent** - Shows real-time progress and status during scanning operations
 3. **Professional** - Clean, developer-focused interface that feels like a proper DevOps tool
 
 **Complexity Level**: Light Application (multiple features with basic state)
-- Multiple interconnected features: org search, repo scanning, LFS detection, CSV export
-- Requires managing async operations, pagination, and progress state
+- Multiple interconnected features: org search, repo scanning, JFrog LFS detection, CSV export, scan state management
+- Requires managing async operations, pagination, error recovery, and progress state
 
 ## Essential Features
 
@@ -27,22 +27,36 @@ A tool for discovering repositories that use Git LFS within large GitHub organiz
 - **Progression**: Fetch page 1 → Continue pagination → Build repo list → Show count
 - **Success criteria**: All repos fetched with progress indicator
 
-### 3. LFS Detection
-- **Functionality**: Check each repo's .gitattributes for LFS filter patterns
-- **Purpose**: Identify which repos use Git LFS
+### 3. JFrog LFS Detection
+- **Functionality**: Check each repo's .lfsconfig files for JFrog references
+- **Purpose**: Identify which repos use JFrog LFS
 - **Trigger**: After repo list is built
-- **Progression**: Queue repos → Check .gitattributes → Parse for LFS patterns → Mark as LFS/non-LFS
+- **Progression**: Queue repos → Check .lfsconfig files → Parse for JFrog patterns → Mark status
 - **Success criteria**: Accurate detection with progress shown
 
-### 4. Results Display
-- **Functionality**: Show filterable list of LFS repos with details
-- **Purpose**: Let users review findings before export
-- **Trigger**: After scan completes
-- **Progression**: Display results → Filter/sort → Select for export
-- **Success criteria**: Clear presentation of repo names, sizes, LFS status
+### 4. Error Handling & Retry
+- **Functionality**: Automatic retry with exponential backoff for 5xx errors and network failures
+- **Purpose**: Handle transient GitHub API errors gracefully
+- **Trigger**: On any server error or network failure
+- **Progression**: Detect error → Wait with backoff → Retry up to 3 times → Capture partial results on failure
+- **Success criteria**: Transient errors recovered automatically, permanent failures provide partial results
 
-### 5. CSV Export
-- **Functionality**: Generate downloadable CSV of LFS repos
+### 5. Scan State Management
+- **Functionality**: Track scanned/pending repos, save/load state as JSON
+- **Purpose**: Enable resuming interrupted scans without re-scanning completed repos
+- **Trigger**: State auto-saved on error; user can download/upload state files
+- **Progression**: Error occurs → State captured → User downloads JSON → Later uploads → Resume pending repos only
+- **Success criteria**: Scans can be paused/resumed across sessions without data loss
+
+### 6. Results Display
+- **Functionality**: Show list of JFrog LFS repos with details
+- **Purpose**: Let users review findings before export
+- **Trigger**: After scan completes or on partial results
+- **Progression**: Display results → Review details
+- **Success criteria**: Clear presentation of repo names, JFrog URLs, config locations
+
+### 7. CSV Export
+- **Functionality**: Generate downloadable CSV of JFrog repos (full or partial)
 - **Purpose**: Enable reporting and further analysis
 - **Trigger**: User clicks export button
 - **Progression**: Generate CSV → Trigger download
@@ -50,11 +64,12 @@ A tool for discovering repositories that use Git LFS within large GitHub organiz
 
 ## Edge Case Handling
 
-- **Rate Limiting**: Display remaining requests, pause when near limit, support multiple PATs for rotation
+- **Rate Limiting**: Display remaining requests, rotate PAT tokens, capture partial results on limit
+- **Server Errors (5xx)**: Automatic retry with exponential backoff (1s, 3s, 5s delays)
+- **Network Failures**: Retry logic, preserve scanned results, allow resume
 - **Private Orgs**: Clear messaging when PAT lacks permissions
-- **Empty Results**: Friendly state when no LFS repos found
-- **Network Errors**: Retry logic with exponential backoff, clear error messages
-- **Large Orgs**: Progress indicator, estimated time remaining
+- **Empty Results**: Friendly state when no JFrog repos found
+- **Large Orgs**: Progress indicator, scan state for resumability
 
 ## Design Direction
 
