@@ -358,6 +358,7 @@ export interface ScanResult {
   rateLimitReset?: Date
   errorMessage?: string
   scanState: ScanState
+  wasPaused?: boolean
 }
 
 export async function checkAllReposForJfrog(
@@ -368,7 +369,8 @@ export async function checkAllReposForJfrog(
   rotateToken?: () => void,
   getTokenCount?: () => number,
   existingScanState?: ScanState,
-  onRetry?: (attempt: number, maxRetries: number, error: string) => void
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void,
+  shouldCancel?: () => boolean
 ): Promise<ScanResult> {
   const orgName = repos[0]?.full_name.split('/')[0] || 'unknown'
   
@@ -391,6 +393,16 @@ export async function checkAllReposForJfrog(
   const concurrency = token ? 5 : 2
 
   for (let i = 0; i < pendingRepos.length; i += concurrency) {
+    if (shouldCancel?.()) {
+      return {
+        repos: results,
+        isPartial: true,
+        wasPaused: true,
+        errorMessage: `Scan paused by user. ${scanState.scannedRepoIds.length} repos scanned, ${scanState.pendingRepoIds.length} remaining.`,
+        scanState
+      }
+    }
+
     const batch = pendingRepos.slice(i, i + concurrency)
     
     try {

@@ -22,7 +22,8 @@ import {
   ArrowsClockwise,
   UploadSimple,
   FloppyDisk,
-  ArrowCounterClockwise
+  ArrowCounterClockwise,
+  Pause
 } from '@phosphor-icons/react'
 import {
   Repository,
@@ -67,6 +68,7 @@ function App() {
   const tokenIndexRef = useRef(0)
   const tokensRef = useRef<string[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const cancelScanRef = useRef(false)
 
   tokensRef.current = tokens
 
@@ -131,6 +133,8 @@ function App() {
   const handleScan = async (resumeState?: ScanState) => {
     const targetOrg = resumeState?.orgName || orgName.trim()
     if (!targetOrg) return
+
+    cancelScanRef.current = false
 
     if (resumeState) {
       setOrgName(resumeState.orgName)
@@ -206,7 +210,8 @@ function App() {
         rotateToken,
         getTokenCount,
         currentScanState,
-        handleRetry
+        handleRetry,
+        () => cancelScanRef.current
       )
 
       setRepos(scanResult.repos)
@@ -214,7 +219,9 @@ function App() {
       setRetryMessage(null)
       
       if (scanResult.isPartial) {
-        downloadScanState(scanResult.scanState)
+        if (!scanResult.wasPaused) {
+          downloadScanState(scanResult.scanState)
+        }
         
         setProgress(prev => ({
           ...prev,
@@ -222,7 +229,9 @@ function App() {
           checkedRepos: scanResult.scanState.scannedRepoIds.length,
           jfrogReposFound: scanResult.repos.filter(r => r.hasJfrog).length,
           rateLimitReset: scanResult.rateLimitReset || null,
-          error: scanResult.errorMessage || `Scan interrupted. ${scanResult.scanState.scannedRepoIds.length} of ${allRepos.length} repositories scanned. State file auto-downloaded for recovery.`
+          error: scanResult.wasPaused 
+            ? scanResult.errorMessage || 'Scan paused by user.'
+            : scanResult.errorMessage || `Scan interrupted. ${scanResult.scanState.scannedRepoIds.length} of ${allRepos.length} repositories scanned. State file auto-downloaded for recovery.`
         }))
       } else {
         setProgress(prev => ({
@@ -264,6 +273,10 @@ function App() {
     }
   }
 
+  const handlePause = useCallback(() => {
+    cancelScanRef.current = true
+  }, [])
+
   const handleResume = () => {
     if (scanState && scanState.pendingRepoIds.length > 0) {
       handleScan(scanState)
@@ -275,6 +288,13 @@ function App() {
     const csv = generateCsv(jfrogRepos)
     const targetOrg = scanState?.orgName || orgName
     downloadCsv(csv, `${targetOrg}-jfrog-repos-${new Date().toISOString().split('T')[0]}.csv`)
+  }
+
+  const handleExportFromState = () => {
+    if (scanState) {
+      const csv = generateCsv(scanState.jfrogRepos)
+      downloadCsv(csv, `${scanState.orgName}-jfrog-repos-${new Date().toISOString().split('T')[0]}.csv`)
+    }
   }
 
   const handleExportState = () => {
@@ -334,6 +354,7 @@ function App() {
   const isScanning = progress.phase === 'fetching-repos' || progress.phase === 'checking-lfs'
   const isFinished = progress.phase === 'complete' || progress.phase === 'partial'
   const canResume = scanState && scanState.pendingRepoIds.length > 0 && !isScanning
+  const canExportFromState = scanState && scanState.jfrogRepos.length > 0 && !isScanning
   const scanProgress = progress.totalRepos > 0 
     ? Math.round((progress.checkedRepos / progress.totalRepos) * 100)
     : 0
@@ -370,23 +391,29 @@ function App() {
                   disabled={isScanning}
                   className="bg-input border-border font-mono"
                 />
-                <Button 
-                  onClick={() => handleScan()}
-                  disabled={!orgName.trim() || isScanning}
-                  className="shrink-0"
-                >
-                  {isScanning ? (
+                {isScanning ? (
+                  <Button 
+                    onClick={handlePause}
+                    variant="destructive"
+                    className="shrink-0"
+                  >
                     <span className="flex items-center gap-2">
-                      <div className="w-4 h-4 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin" />
-                      Scanning
+                      <Pause size={16} weight="fill" />
+                      Pause
                     </span>
-                  ) : (
+                  </Button>
+                ) : (
+                  <Button 
+                    onClick={() => handleScan()}
+                    disabled={!orgName.trim()}
+                    className="shrink-0"
+                  >
                     <span className="flex items-center gap-2">
                       Scan
                       <ArrowRight size={16} />
                     </span>
-                  )}
-                </Button>
+                  </Button>
+                )}
               </div>
               <div className="flex gap-2">
                 <Button
@@ -399,6 +426,17 @@ function App() {
                   <UploadSimple size={14} className="mr-1.5" />
                   Load State
                 </Button>
+                {canExportFromState && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleExportFromState}
+                    className="flex-1"
+                  >
+                    <Download size={14} className="mr-1.5" />
+                    Export CSV ({scanState.jfrogRepos.length})
+                  </Button>
+                )}
                 {canResume && (
                   <Button
                     variant="secondary"
