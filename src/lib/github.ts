@@ -76,20 +76,27 @@ export interface ScanState {
   ghesHost?: string
 }
 
-export function getApiBaseUrl(ghesHost?: string): string {
+export function normalizeGhesHost(ghesHost?: string): string | undefined {
   if (!ghesHost || ghesHost.trim() === '' || ghesHost.trim().toLowerCase() === 'github.com') {
+    return undefined
+  }
+  return ghesHost.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '').toLowerCase()
+}
+
+export function getApiBaseUrl(ghesHost?: string): string {
+  const normalizedHost = normalizeGhesHost(ghesHost)
+  if (!normalizedHost) {
     return 'https://api.github.com'
   }
-  const host = ghesHost.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')
-  return `https://${host}/api/v3`
+  return `https://${normalizedHost}/api/v3`
 }
 
 export function getWebBaseUrl(ghesHost?: string): string {
-  if (!ghesHost || ghesHost.trim() === '' || ghesHost.trim().toLowerCase() === 'github.com') {
+  const normalizedHost = normalizeGhesHost(ghesHost)
+  if (!normalizedHost) {
     return 'https://github.com'
   }
-  const host = ghesHost.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')
-  return `https://${host}`
+  return `https://${normalizedHost}`
 }
 
 const MAX_RETRIES = 5

@@ -41,7 +41,7 @@ import {
   downloadScanState,
   parseScanState,
   fetchTokenRateLimits,
-  getApiBaseUrl
+  normalizeGhesHost
 } from '@/lib/github'
 
 function App() {
@@ -84,7 +84,7 @@ function App() {
     }
     setLoadingLimits(true)
     try {
-      const limits = await fetchTokenRateLimits(tokens, ghesHostRef.current)
+      const limits = await fetchTokenRateLimits(tokens, normalizeGhesHost(ghesHostRef.current))
       setAggregateLimit(limits)
     } finally {
       setLoadingLimits(false)
@@ -139,14 +139,12 @@ function App() {
     const targetOrg = resumeState?.orgName || orgName.trim()
     if (!targetOrg) return
 
-    const targetGhesHost = resumeState?.ghesHost || ghesHost.trim()
+    const targetGhesHost = normalizeGhesHost(resumeState?.ghesHost || ghesHost.trim())
     cancelScanRef.current = false
 
     if (resumeState) {
       setOrgName(resumeState.orgName)
-      if (resumeState.ghesHost) {
-        setGhesHost(resumeState.ghesHost)
-      }
+      setGhesHost(resumeState.ghesHost || '')
     }
 
     setRepos(resumeState?.jfrogRepos || [])
@@ -194,7 +192,7 @@ function App() {
           pendingRepoIds: allRepos.map(r => r.id),
           jfrogRepos: [],
           isComplete: false,
-          ghesHost: targetGhesHost || undefined
+          ghesHost: targetGhesHost
         }
       }
 
@@ -330,9 +328,7 @@ function App() {
       if (state) {
         setScanState(state)
         setOrgName(state.orgName)
-        if (state.ghesHost) {
-          setGhesHost(state.ghesHost)
-        }
+        setGhesHost(state.ghesHost || '')
         setRepos(state.jfrogRepos)
         setProgress({
           phase: state.isComplete ? 'complete' : 'partial',
