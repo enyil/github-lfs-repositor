@@ -73,6 +73,23 @@ export interface ScanState {
   jfrogRepos: Repository[]
   lastError?: string
   isComplete: boolean
+  ghesHost?: string
+}
+
+export function getApiBaseUrl(ghesHost?: string): string {
+  if (!ghesHost || ghesHost.trim() === '' || ghesHost.trim().toLowerCase() === 'github.com') {
+    return 'https://api.github.com'
+  }
+  const host = ghesHost.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')
+  return `https://${host}/api/v3`
+}
+
+export function getWebBaseUrl(ghesHost?: string): string {
+  if (!ghesHost || ghesHost.trim() === '' || ghesHost.trim().toLowerCase() === 'github.com') {
+    return 'https://github.com'
+  }
+  const host = ghesHost.trim().replace(/^https?:\/\//, '').replace(/\/$/, '')
+  return `https://${host}`
 }
 
 const MAX_RETRIES = 5
@@ -195,13 +212,16 @@ export async function fetchOrgRepos(
   rotateToken?: () => void,
   getTokenCount?: () => number,
   existingRepos?: Repository[],
-  onRetry?: (attempt: number, maxRetries: number, error: string) => void
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void,
+  ghesHost?: string
 ): Promise<Repository[]> {
   if (existingRepos && existingRepos.length > 0) {
     onProgress(existingRepos, 0)
     return existingRepos
   }
 
+  const apiBaseUrl = getApiBaseUrl(ghesHost)
+  const webBaseUrl = getWebBaseUrl(ghesHost)
   const allRepos: Repository[] = []
   let page = 1
   const perPage = 100
@@ -222,7 +242,7 @@ export async function fetchOrgRepos(
     }
 
     const response = await fetchWithTokenRotation(
-      `https://api.github.com/orgs/${org}/repos?per_page=${perPage}&page=${page}&sort=pushed`,
+      `${apiBaseUrl}/orgs/${org}/repos?per_page=${perPage}&page=${page}&sort=pushed`,
       headers,
       tokenManager,
       onRateLimit,
@@ -245,7 +265,7 @@ export async function fetchOrgRepos(
         id: r.id,
         name: r.name,
         full_name: r.full_name,
-        html_url: r.html_url,
+        html_url: r.html_url || `${webBaseUrl}/${r.full_name}`,
         description: r.description,
         size: r.size,
         default_branch: r.default_branch,
@@ -275,8 +295,10 @@ export async function checkRepoForJfrog(
   onRateLimit: (limit: GitHubRateLimit) => void,
   rotateToken?: () => void,
   getTokenCount?: () => number,
-  onRetry?: (attempt: number, maxRetries: number, error: string) => void
+  onRetry?: (attempt: number, maxRetries: number, error: string) => void,
+  ghesHost?: string
 ): Promise<Repository> {
+  const apiBaseUrl = getApiBaseUrl(ghesHost)
   const triedTokens = new Set<string>()
   const tokenManager: TokenManager = {
     getToken,
@@ -291,7 +313,7 @@ export async function checkRepoForJfrog(
   }
 
   const treeResponse = await fetchWithTokenRotation(
-    `https://api.github.com/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
+    `${apiBaseUrl}/repos/${repo.full_name}/git/trees/${repo.default_branch}?recursive=1`,
     headers,
     tokenManager,
     onRateLimit,
@@ -320,7 +342,7 @@ export async function checkRepoForJfrog(
     }
 
     const contentResponse = await fetchWithTokenRotation(
-      `https://api.github.com/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
+      `${apiBaseUrl}/repos/${repo.full_name}/contents/${encodeURIComponent(file.path)}?ref=${repo.default_branch}`,
       contentHeaders,
       tokenManager,
       onRateLimit,
@@ -370,7 +392,8 @@ export async function checkAllReposForJfrog(
   getTokenCount?: () => number,
   existingScanState?: ScanState,
   onRetry?: (attempt: number, maxRetries: number, error: string) => void,
-  shouldCancel?: () => boolean
+  shouldCancel?: () => boolean,
+  ghesHost?: string
 ): Promise<ScanResult> {
   const orgName = repos[0]?.full_name.split('/')[0] || 'unknown'
   
@@ -381,7 +404,8 @@ export async function checkAllReposForJfrog(
     scannedRepoIds: [],
     pendingRepoIds: repos.map(r => r.id),
     jfrogRepos: [],
-    isComplete: false
+    isComplete: false,
+    ghesHost
   }
 
   const pendingRepos = repos.filter(r => scanState.pendingRepoIds.includes(r.id))
@@ -407,7 +431,7 @@ export async function checkAllReposForJfrog(
     
     try {
       const batchResults = await Promise.all(
-        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit, rotateToken, getTokenCount, onRetry))
+        batch.map(repo => checkRepoForJfrog(repo, getToken, onRateLimit, rotateToken, getTokenCount, onRetry, ghesHost || scanState.ghesHost))
       )
       
       for (const result of batchResults) {
@@ -543,19 +567,20 @@ export interface AggregateRateLimit {
   uniqueUsers: number
 }
 
-export async function fetchTokenRateLimits(tokens: string[]): Promise<AggregateRateLimit> {
+export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string): Promise<AggregateRateLimit> {
+  const apiBaseUrl = getApiBaseUrl(ghesHost)
   const tokenLimits: TokenRateLimit[] = []
   
   for (const token of tokens) {
     try {
       const [rateLimitResponse, userResponse] = await Promise.all([
-        fetch('https://api.github.com/rate_limit', {
+        fetch(`${apiBaseUrl}/rate_limit`, {
           headers: {
             'Accept': 'application/vnd.github+json',
             'Authorization': `Bearer ${token}`
           }
         }),
-        fetch('https://api.github.com/user', {
+        fetch(`${apiBaseUrl}/user`, {
           headers: {
             'Accept': 'application/vnd.github+json',
             'Authorization': `Bearer ${token}`

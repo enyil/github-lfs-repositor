@@ -23,7 +23,8 @@ import {
   UploadSimple,
   FloppyDisk,
   ArrowCounterClockwise,
-  Pause
+  Pause,
+  Globe
 } from '@phosphor-icons/react'
 import {
   Repository,
@@ -39,11 +40,13 @@ import {
   downloadCsv,
   downloadScanState,
   parseScanState,
-  fetchTokenRateLimits
+  fetchTokenRateLimits,
+  getApiBaseUrl
 } from '@/lib/github'
 
 function App() {
   const [orgName, setOrgName] = useState('')
+  const [ghesHost, setGhesHost] = useState('')
   const [tokens, setTokens] = useState<string[]>([])
   const [newToken, setNewToken] = useState('')
   const [showTokens, setShowTokens] = useState(false)
@@ -67,10 +70,12 @@ function App() {
   const [currentTokenIndex, setCurrentTokenIndex] = useState(0)
   const tokenIndexRef = useRef(0)
   const tokensRef = useRef<string[]>([])
+  const ghesHostRef = useRef('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cancelScanRef = useRef(false)
 
   tokensRef.current = tokens
+  ghesHostRef.current = ghesHost
 
   const refreshRateLimits = useCallback(async () => {
     if (tokens.length === 0) {
@@ -79,7 +84,7 @@ function App() {
     }
     setLoadingLimits(true)
     try {
-      const limits = await fetchTokenRateLimits(tokens)
+      const limits = await fetchTokenRateLimits(tokens, ghesHostRef.current)
       setAggregateLimit(limits)
     } finally {
       setLoadingLimits(false)
@@ -88,7 +93,7 @@ function App() {
 
   useEffect(() => {
     refreshRateLimits()
-  }, [tokens.length])
+  }, [tokens.length, ghesHost])
 
   const getCurrentToken = useCallback(() => {
     if (tokensRef.current.length === 0) return null
@@ -134,10 +139,14 @@ function App() {
     const targetOrg = resumeState?.orgName || orgName.trim()
     if (!targetOrg) return
 
+    const targetGhesHost = resumeState?.ghesHost || ghesHost.trim()
     cancelScanRef.current = false
 
     if (resumeState) {
       setOrgName(resumeState.orgName)
+      if (resumeState.ghesHost) {
+        setGhesHost(resumeState.ghesHost)
+      }
     }
 
     setRepos(resumeState?.jfrogRepos || [])
@@ -172,7 +181,8 @@ function App() {
         rotateToken,
         getTokenCount,
         undefined,
-        handleRetry
+        handleRetry,
+        targetGhesHost
       )
 
       if (!currentScanState) {
@@ -183,7 +193,8 @@ function App() {
           scannedRepoIds: [],
           pendingRepoIds: allRepos.map(r => r.id),
           jfrogRepos: [],
-          isComplete: false
+          isComplete: false,
+          ghesHost: targetGhesHost || undefined
         }
       }
 
@@ -211,7 +222,8 @@ function App() {
         getTokenCount,
         currentScanState,
         handleRetry,
-        () => cancelScanRef.current
+        () => cancelScanRef.current,
+        targetGhesHost
       )
 
       setRepos(scanResult.repos)
@@ -318,6 +330,9 @@ function App() {
       if (state) {
         setScanState(state)
         setOrgName(state.orgName)
+        if (state.ghesHost) {
+          setGhesHost(state.ghesHost)
+        }
         setRepos(state.jfrogRepos)
         setProgress({
           phase: state.isComplete ? 'complete' : 'partial',
@@ -381,6 +396,27 @@ function App() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Globe size={14} className="text-muted-foreground shrink-0" />
+                  <Input
+                    id="ghes-host"
+                    placeholder="github.com"
+                    value={ghesHost}
+                    onChange={(e) => setGhesHost(e.target.value)}
+                    disabled={isScanning}
+                    className="bg-input border-border font-mono text-sm flex-1"
+                  />
+                  {ghesHost.trim() && ghesHost.trim().toLowerCase() !== 'github.com' && (
+                    <Badge variant="outline" className="text-[10px] font-mono shrink-0 text-accent border-accent/50">
+                      GHES
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-[10px] text-muted-foreground pl-6">
+                  Leave blank for github.com, or enter your GHES hostname
+                </p>
+              </div>
               <div className="flex gap-2">
                 <Input
                   id="org-name"
