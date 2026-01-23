@@ -575,7 +575,8 @@ export interface TokenRateLimit {
 }
 
 export interface AggregateRateLimit {
-  const apiBaseUrl = getApiBaseUrl(ghesHost)
+  totalRemaining: number
+  totalLimit: number
   tokenLimits: TokenRateLimit[]
   uniqueUsers: number
   errors?: string[]
@@ -596,28 +597,28 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
           headers: {
             'Accept': 'application/vnd.github+json',
             'Authorization': `Bearer ${token}`
+          },
+          signal: controller.signal
+        }),
+        fetch(`${apiBaseUrl}/user`, {
+          headers: {
+            'Accept': 'application/vnd.github+json',
+            'Authorization': `Bearer ${token}`
+          },
+          signal: controller.signal
+        })
+      ])
+      
+      clearTimeout(timeoutId)
+      
+      if (rateLimitResponse.ok) {
         const rateLimitData = await rateLimitResponse.json()
         
         let remaining: number
         let limit: number
         let resetTimestamp: number
-            'Accept': 'application/vnd.github+json',
+        
         if (rateLimitData?.resources?.core) {
-          remaining = rateLimitData.resources.core.remaining
-          limit = rateLimitData.resources.core.limit
-          resetTimestamp = rateLimitData.resources.core.reset
-        } else if (rateLimitData?.rate) {
-          remaining = rateLimitData.rate.remaining
-          limit = rateLimitData.rate.limit
-          resetTimestamp = rateLimitData.rate.reset
-        } else {
-          remaining = parseInt(rateLimitResponse.headers.get('x-ratelimit-remaining') || '0')
-          limit = parseInt(rateLimitResponse.headers.get('x-ratelimit-limit') || '5000')
-          resetTimestamp = parseInt(rateLimitResponse.headers.get('x-ratelimit-reset') || '0')
-        }
-        
-        const reset = new Date(resetTimestamp * 1000)
-        
           remaining = rateLimitData.resources.core.remaining
           limit = rateLimitData.resources.core.limit
           resetTimestamp = rateLimitData.resources.core.reset
@@ -635,6 +636,21 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
         
         let userId: number | undefined
         let username: string | undefined
+        
+        if (userResponse.ok) {
+          const userData = await userResponse.json()
+          userId = userData.id
+          username = userData.login
+        }
+        
+        tokenLimits.push({
+          token,
+          remaining,
+          limit,
+          reset,
+          userId,
+          username
+        })
       } else {
         const headerRemaining = rateLimitResponse.headers.get('x-ratelimit-remaining')
         const headerLimit = rateLimitResponse.headers.get('x-ratelimit-limit')
@@ -647,21 +663,6 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
           if (userResponse.ok) {
             const userData = await userResponse.json()
             userId = userData.id
-            username = userData.login
-          }
-          
-          tokenLimits.push({
-            token,
-            remaining: parseInt(headerRemaining),
-            limit: parseInt(headerLimit),
-            reset: new Date(parseInt(headerReset || '0') * 1000),
-            userId,
-            username
-          })
-        }
-          if (userResponse.ok) {
-    } catch (e) {wait userResponse.json()
-      console.error('Error fetching rate limit for token:', e)
             username = userData.login
           }
           
@@ -686,7 +687,7 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
       }
     }
   }
-    uniqueUsers: seenUserIds.size || tokenLimits.length
+
   const seenUserIds = new Set<number>()
   let totalRemaining = 0
   let totalLimit = 0
@@ -710,5 +711,5 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
     tokenLimits,
     uniqueUsers: seenUserIds.size || tokenLimits.length,
     errors: errors.length > 0 ? errors : undefined
-  } as AggregateRateLimit
+  }
 }
