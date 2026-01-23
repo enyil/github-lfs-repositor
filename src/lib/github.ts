@@ -150,11 +150,18 @@ async function fetchWithRetry(
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         lastError = new NetworkError('Request timeout', undefined, true)
+      } else if (error instanceof TypeError && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError'))) {
+        lastError = new NetworkError(
+          `Network error - this may be a CORS issue if connecting to a GHES instance. Ensure the server allows cross-origin requests from this domain.`,
+          undefined,
+          false
+        )
+        throw lastError
       } else {
         lastError = error instanceof Error ? error : new Error(String(error))
       }
       
-      if (attempt < retries - 1) {
+      if (attempt < retries - 1 && !(lastError instanceof NetworkError && !lastError.retryable)) {
         const delay = RETRY_DELAYS[attempt] || 15000
         onRetry?.(attempt + 1, retries, `${lastError.message}, retrying in ${delay / 1000}s...`)
         await sleep(delay)
@@ -572,34 +579,60 @@ export interface AggregateRateLimit {
   totalLimit: number
   tokenLimits: TokenRateLimit[]
   uniqueUsers: number
+  errors?: string[]
 }
 
 export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string): Promise<AggregateRateLimit> {
-  const normalizedHost = normalizeGhesHost(ghesHost)
-  const apiBaseUrl = getApiBaseUrl(normalizedHost)
+  const apiBaseUrl = getApiBaseUrl(ghesHost)
   const tokenLimits: TokenRateLimit[] = []
+  const errors: string[] = []
   
   for (const token of tokens) {
     try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10000)
+      
       const [rateLimitResponse, userResponse] = await Promise.all([
         fetch(`${apiBaseUrl}/rate_limit`, {
           headers: {
             'Accept': 'application/vnd.github+json',
             'Authorization': `Bearer ${token}`
-          }
+          },
+          signal: controller.signal
         }),
         fetch(`${apiBaseUrl}/user`, {
           headers: {
             'Accept': 'application/vnd.github+json',
             'Authorization': `Bearer ${token}`
-          }
+          },
+          signal: controller.signal
         })
       ])
       
+      clearTimeout(timeoutId)
+      
       if (rateLimitResponse.ok) {
-        const remaining = parseInt(rateLimitResponse.headers.get('x-ratelimit-remaining') || '0')
-        const limit = parseInt(rateLimitResponse.headers.get('x-ratelimit-limit') || '5000')
-        const reset = new Date(parseInt(rateLimitResponse.headers.get('x-ratelimit-reset') || '0') * 1000)
+        const rateLimitData = await rateLimitResponse.json()
+        
+        let remaining: number
+        let limit: number
+        let resetTimestamp: number
+        
+        if (rateLimitData?.resources?.core) {
+          remaining = rateLimitData.resources.core.remaining
+          limit = rateLimitData.resources.core.limit
+          resetTimestamp = rateLimitData.resources.core.reset
+        } else if (rateLimitData?.rate) {
+          remaining = rateLimitData.rate.remaining
+          limit = rateLimitData.rate.limit
+          resetTimestamp = rateLimitData.rate.reset
+        } else {
+          remaining = parseInt(rateLimitResponse.headers.get('x-ratelimit-remaining') || '0')
+          limit = parseInt(rateLimitResponse.headers.get('x-ratelimit-limit') || '5000')
+          resetTimestamp = parseInt(rateLimitResponse.headers.get('x-ratelimit-reset') || '0')
+        }
+        
+        const reset = new Date(resetTimestamp * 1000)
         
         let userId: number | undefined
         let username: string | undefined
@@ -618,8 +651,40 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
           userId,
           username
         })
+      } else {
+        const headerRemaining = rateLimitResponse.headers.get('x-ratelimit-remaining')
+        const headerLimit = rateLimitResponse.headers.get('x-ratelimit-limit')
+        const headerReset = rateLimitResponse.headers.get('x-ratelimit-reset')
+        
+        if (headerRemaining && headerLimit) {
+          let userId: number | undefined
+          let username: string | undefined
+          
+          if (userResponse.ok) {
+            const userData = await userResponse.json()
+            userId = userData.id
+            username = userData.login
+          }
+          
+          tokenLimits.push({
+            token,
+            remaining: parseInt(headerRemaining),
+            limit: parseInt(headerLimit),
+            reset: new Date(parseInt(headerReset || '0') * 1000),
+            userId,
+            username
+          })
+        } else {
+          errors.push(`Token ${token.slice(0, 8)}...: HTTP ${rateLimitResponse.status}`)
+        }
       }
-    } catch {
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : String(e)
+      if (errorMsg.includes('Failed to fetch') || errorMsg.includes('NetworkError') || errorMsg.includes('AbortError')) {
+        errors.push(`Token ${token.slice(0, 8)}...: Network error (CORS or connectivity issue)`)
+      } else {
+        errors.push(`Token ${token.slice(0, 8)}...: ${errorMsg}`)
+      }
     }
   }
   
@@ -644,6 +709,7 @@ export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string):
     totalRemaining,
     totalLimit,
     tokenLimits,
-    uniqueUsers: seenUserIds.size
-  }
+    uniqueUsers: seenUserIds.size || tokenLimits.length,
+    errors: errors.length > 0 ? errors : undefined
+  } as AggregateRateLimit
 }

@@ -610,6 +610,9 @@ function App() {
                               ({tokenLimit.remaining})
                             </span>
                           )}
+                          {!tokenLimit && !loadingLimits && aggregateLimit && (
+                            <span className="text-destructive">(failed)</span>
+                          )}
                         </span>
                         <button
                           onClick={() => handleRemoveToken(i)}
@@ -620,6 +623,19 @@ function App() {
                       </div>
                     )
                   })}
+                  {aggregateLimit?.errors && aggregateLimit.errors.length > 0 && (
+                    <div className="mt-2 p-2 bg-destructive/10 border border-destructive/30 rounded text-xs">
+                      <p className="text-destructive font-medium mb-1">Connection errors:</p>
+                      {aggregateLimit.errors.map((err, i) => (
+                        <p key={i} className="text-destructive/80">{err}</p>
+                      ))}
+                      {ghesHost && ghesHost.trim() && ghesHost.trim().toLowerCase() !== 'github.com' && (
+                        <p className="text-muted-foreground mt-2 pt-2 border-t border-destructive/20">
+                          GHES instances may block browser requests due to CORS. Ensure your GHES instance allows cross-origin requests.
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </CardContent>
