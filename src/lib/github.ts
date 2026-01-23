@@ -575,7 +575,8 @@ export interface AggregateRateLimit {
 }
 
 export async function fetchTokenRateLimits(tokens: string[], ghesHost?: string): Promise<AggregateRateLimit> {
-  const apiBaseUrl = getApiBaseUrl(ghesHost)
+  const normalizedHost = normalizeGhesHost(ghesHost)
+  const apiBaseUrl = getApiBaseUrl(normalizedHost)
   const tokenLimits: TokenRateLimit[] = []
   
   for (const token of tokens) {

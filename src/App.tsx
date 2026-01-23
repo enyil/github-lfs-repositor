@@ -84,16 +84,16 @@ function App() {
     }
     setLoadingLimits(true)
     try {
-      const limits = await fetchTokenRateLimits(tokens, normalizeGhesHost(ghesHostRef.current))
+      const limits = await fetchTokenRateLimits(tokens, ghesHost)
       setAggregateLimit(limits)
     } finally {
       setLoadingLimits(false)
     }
-  }, [tokens])
+  }, [tokens, ghesHost])
 
   useEffect(() => {
     refreshRateLimits()
-  }, [tokens.length, ghesHost])
+  }, [refreshRateLimits])
 
   const getCurrentToken = useCallback(() => {
     if (tokensRef.current.length === 0) return null
